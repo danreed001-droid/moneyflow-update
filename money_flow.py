@@ -993,8 +993,23 @@ def render_candlestick_svg(ohlc, width=680, height=110, show_x_axis=False, n_tic
         frac = (val - lo) / span
         return pad + (1 - frac) * draw_h
 
+    # bar_w has a floor so bars stay visible even with hundreds of candles
+    # (e.g. 300 hourly bars in the side-by-side layout's 330px-wide chart).
+    # But if that floor pushes n*bar_w + (n-1)*gap past `width`, the extra
+    # width doesn't get seen -- it overflows the SVG viewBox and clips the
+    # right/most-recent end of the chart, silently hiding the latest
+    # candles (including the current hour). So after applying the floor,
+    # shrink `gap` (down to 0 if needed) to force the total back to fit
+    # exactly within `width` -- never let bar_w's floor cause an overflow.
     gap = 1.0
     bar_w = max(0.5, (width - gap * (n - 1)) / n)
+    if n > 1:
+        total_natural = n * bar_w + (n - 1) * gap
+        if total_natural > width:
+            gap = max(0.0, (width - n * bar_w) / (n - 1))
+            if n * bar_w > width:
+                bar_w = width / n
+                gap = 0.0
     body_w = max(0.4, bar_w * 0.7)
     wick_w = max(0.4, bar_w * 0.18)
 
