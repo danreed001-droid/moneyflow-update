@@ -1,0 +1,55 @@
+name: Money Flow Snapshot
+
+on:
+  schedule:
+    # Every hour, every day (BTC-USD and the futures book trade nearly around
+    # the clock, so this isn't restricted to US weekday market hours).
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run snapshot
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python money_flow.py
+
+      - name: Commit latest report
+        run: |
+          git config user.name "money-flow-bot"
+          git config user.email "actions@github.com"
+          git add latest.txt index.html equilibrium.html
+          if git diff --staged --quiet; then
+            echo "Nothing changed, skipping commit."
+            exit 0
+          fi
+          git commit -m "Update snapshot $(date -u +%FT%TZ)"
+          # Retry with rebase in case another run (or a manual dispatch that
+          # overlaps the hourly schedule) pushed in between our checkout and
+          # this push -- otherwise a plain rejected push here silently drops
+          # this run's index.html/latest.txt/equilibrium.html update.
+          n=0
+          until git push; do
+            n=$((n + 1))
+            if [ "$n" -ge 5 ]; then
+              echo "Giving up after $n failed push attempts." >&2
+              exit 1
+            fi
+            echo "Push rejected, pulling --rebase and retrying ($n/5)..."
+            sleep $((RANDOM % 10 + 1))
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
+          done
