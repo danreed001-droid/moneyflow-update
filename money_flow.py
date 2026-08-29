@@ -132,6 +132,32 @@ def fetch_daily(ticker, period="90d"):
         return None
 
 
+def ohlc_list_from_hist(hist):
+    """Convert a yfinance history DataFrame (Open/High/Low/Close columns,
+    DatetimeIndex) into the same oldest -> newest list-of-dicts OHLC shape
+    fetch_hourly_ohlc() returns, so daily bars (already fetched via
+    fetch_daily() for the 3d/30d window metrics) can feed the same RSI /
+    Equilibrium-history machinery as hourly ones, with no extra network
+    call."""
+    if hist is None or hist.empty:
+        return None
+    h = hist.dropna(subset=["Open", "High", "Low", "Close"])
+    if h.empty:
+        return None
+    out = []
+    for r in h.itertuples():
+        ts = r.Index
+        try:
+            ts = ts.tz_convert("UTC") if ts.tzinfo is not None else ts.tz_localize("UTC")
+        except Exception:
+            pass
+        out.append({
+            "open": float(r.Open), "high": float(r.High), "low": float(r.Low), "close": float(r.Close),
+            "ts": ts,
+        })
+    return out
+
+
 HOURLY_CANDLE_HOURS = 300
 
 
@@ -674,6 +700,43 @@ def compute_window_metric(ticker, c_now, c_then, pct_ladder):
     }
 
 
+def add_asset_rsi_and_relative_bubbles(assets):
+    """Mutates `assets` in place, adding "rsi_series", "flow_3h_hourly" and
+    "bubble_r" to each asset dict, for the hourly RSI(14) trendline + end
+    bubble shown on the top Cross-asset money flow card.
+
+    Same convention as the futures watchlist: bubble size is the inverse of
+    |% change over the last 3 hourly candles|, but sized RELATIVE TO THE
+    OTHER CROSS-ASSET MONEY FLOW ITEMS ON THIS CARD ONLY -- a separate
+    normalization scope from the futures board's ~35-instrument one and from
+    the Equilibrium page's 6-asset one, since these are three different
+    sets of instruments.
+    """
+    bubble_pcts = {}
+    for a in assets:
+        if a.get("unavailable"):
+            a["rsi_series"] = None
+            a["flow_3h_hourly"] = None
+            continue
+        hourly = a.get("hourly_ohlc")
+        if not hourly or len(hourly) < RSI_PERIOD + 1:
+            a["rsi_series"] = None
+            a["flow_3h_hourly"] = None
+            continue
+        closes = [c["close"] for c in hourly]
+        a["rsi_series"] = rsi_series(closes)
+        flow_3h_hourly = compute_futures_3h_flow(closes)
+        a["flow_3h_hourly"] = flow_3h_hourly
+        if flow_3h_hourly:
+            bubble_pcts[a["ticker"]] = abs(flow_3h_hourly["pct"])
+
+    bubble_radii = compute_relative_bubble_radii_from_pcts(bubble_pcts)
+    for a in assets:
+        if not a.get("unavailable"):
+            a["bubble_r"] = bubble_radii.get(a["ticker"], RSI_BUBBLE_MIN_R)
+    return assets
+
+
 def build_report():
     """Returns (report_text, assets) where `assets` is a list of structured
     dicts consumed by render_html()."""
@@ -719,6 +782,7 @@ def build_report():
             )
 
         daily_hist = fetch_daily(ticker)
+        daily_ohlc = ohlc_list_from_hist(daily_hist)
         if daily_hist is not None:
             closes_d = daily_hist["Close"]
             if len(closes_d) > 3:
@@ -763,7 +827,10 @@ def build_report():
             "since_prev": {"pct": pct, "mag": mag, "flow": since_prev_flow, "statement": statement},
             "windows": windows,
             "hourly_ohlc": hourly_ohlc,
+            "daily_ohlc": daily_ohlc,
         })
+
+    add_asset_rsi_and_relative_bubbles(assets)
 
     report = []
     report.append("Cross-asset money flow snapshot")
@@ -1008,13 +1075,37 @@ def render_row(asset, badge=False):
 
     hourly = asset.get("hourly_ohlc")
     if hourly:
-        candle_svg = render_candlestick_svg(hourly, show_x_axis=True)
+        candle_svg = render_candlestick_svg(hourly, width=330, height=60, show_x_axis=True)
         candle_html = (
             f'<div class="candle-chart with-axis">{candle_svg}</div>'
             f'<div class="candle-caption">Hourly candles · last {len(hourly)}h · UTC</div>'
         )
     else:
         candle_html = '<div class="candle-chart candle-na">Hourly chart unavailable</div>'
+
+    rsi_vals = asset.get("rsi_series")
+    last_rsi = next((v for v in reversed(rsi_vals) if v is not None), None) if rsi_vals else None
+    if last_rsi is not None and hourly:
+        rsi_svg = render_rsi_trend_svg(rsi_vals, asset.get("bubble_r", RSI_BUBBLE_MIN_R), ohlc=hourly, width=330)
+        flow_3h_hourly = asset.get("flow_3h_hourly")
+        pct3h_str = f'{flow_3h_hourly["pct"]:+.2f}%' if flow_3h_hourly else "n/a"
+        rsi_caption = (
+            f'RSI({RSI_PERIOD}) hourly · now {last_rsi:.0f} · bubble sized vs. '
+            f'other cross-asset items (bigger = quieter 3h: {pct3h_str})'
+        )
+        rsi_html = (
+            f'<div class="fut-rsi-chart">{rsi_svg}</div>'
+            f'<div class="candle-caption">{esc(rsi_caption)}</div>'
+        )
+    else:
+        rsi_html = '<div class="fut-rsi-chart fut-na-inline">RSI unavailable (not enough hourly bars)</div>'
+
+    charts_html = (
+        '<div class="row-charts">'
+        f'<div class="row-chart-col">{candle_html}</div>'
+        f'<div class="row-chart-col">{rsi_html}</div>'
+        '</div>'
+    )
 
     sentence = esc(describe_flow_across_windows(flows_for_sentence))
     dot_class = "flat"  # neutral dot; the sentence itself carries the direction detail
@@ -1033,7 +1124,7 @@ def render_row(asset, badge=False):
             <span class="price-delta">{esc(asset["delta_str"])}</span>
           </div>
         </div>
-        {candle_html}
+        {charts_html}
         <div class="row-bottom">
           <span class="flow-tag"><span class="dot {dot_class}"></span>{sentence}</span>
         </div>
@@ -1289,8 +1380,11 @@ CSS = """
   .fut-rsi-chart svg { display: block; width: 100%; height: 92px; }
   .fut-rsi-chart.fut-na-inline { line-height: normal; font-size: 10.5px; color: var(--text-muted); font-style: italic; text-align: center; padding: 10px 0; height: 92px; box-sizing: border-box; }
   .card.card-wide { max-width: 1120px; }
+  .row-charts { display: flex; gap: 18px; align-items: flex-start; margin-top: 4px; }
+  .row-chart-col { flex: 1 1 0; min-width: 0; }
   @media (max-width: 720px) {
     .fut-charts { flex-direction: column; }
+    .row-charts { flex-direction: column; }
   }
 """
 
@@ -1357,11 +1451,11 @@ def render_html(assets, now, futures=None):
 <body>
 <div class="viz-root">
 <div class="stack">
-  <div class="card">
+  <div class="card card-wide">
     <div class="card-head">
       <div>
         <h1>Cross-asset money flow</h1>
-        <p class="subtitle">Where money is moving right now across equities, bonds, the dollar, gold and bitcoin — over the last 3 hours, 3 days, and 30 days.</p>
+        <p class="subtitle">Where money is moving right now across equities, bonds, the dollar, gold and bitcoin — over the last 3 hours, 3 days, and 30 days. Each asset's price chart (left) sits alongside its hourly RSI(14) trend (right); the RSI line ends in a bubble sized relative to the other assets on this card — the quietest one this run gets the biggest bubble.</p>
       </div>
       <div style="display:flex; gap:8px; align-items:flex-start;">
         <a class="theme-toggle" href="#equilibrium" style="text-decoration:none; display:inline-block;">Equilibrium view &darr;</a>
@@ -1398,7 +1492,8 @@ def render_html(assets, now, futures=None):
 """
 
 
-EQUILIBRIUM_HISTORY_HOURS = 20  # slider range: 0 (that many hours ago) .. current hour
+EQUILIBRIUM_HISTORY_HOURS = 20  # hourly slider range: 0 (that many hours ago) .. current hour
+EQUILIBRIUM_HISTORY_DAYS = 20   # daily slider range: 0 (that many trading days ago) .. today
 
 
 def _eq_dom_id(ticker):
@@ -1406,53 +1501,57 @@ def _eq_dom_id(ticker):
     return "".join(ch for ch in ticker if ch.isalnum()) or "x"
 
 
-def build_equilibrium_history(assets, hours=EQUILIBRIUM_HISTORY_HOURS):
-    """Given the `assets` list from build_report() (each with an
-    "hourly_ohlc" list, oldest -> newest), build a real, hour-by-hour replay
-    for the 6 EQUILIBRIUM_TICKERS covering the last `hours` hours plus the
-    current hour (hours+1 frames total) -- NO simulation, no invented
-    motion: every frame is an actual past RSI(14) reading computed from real
-    hourly closes, exactly like the current-hour case, just further back.
+def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
+    """Shared core behind build_equilibrium_history() (hourly) and
+    build_equilibrium_history_daily() (daily). Given the `assets` list from
+    build_report() (each carrying an `ohlc_key` list, oldest -> newest),
+    build a real, candle-by-candle replay for the 6 EQUILIBRIUM_TICKERS
+    covering the last `periods` candles plus the most recent one
+    (periods+1 frames total) -- NO simulation, no invented motion: every
+    frame is an actual past RSI(14) reading computed from real closes of
+    that interval, exactly like the current/latest-candle case, just
+    further back.
 
     Each frame gets its own bubble sizing, relative to the other 5 tickers
-    AT THAT HOUR (not relative to the current hour), so scrubbing the slider
-    shows how the board's relative quiet/volatile ranking itself evolved.
+    AT THAT SAME CANDLE (not relative to the most recent one), so scrubbing
+    the slider shows how the relative quiet/volatile ranking itself
+    evolved.
 
     Returns {"frames": [...]} ordered oldest -> newest (frames[-1] is the
-    current hour), or None if any of the 6 tickers doesn't have enough
-    hourly history to compute at least 2 real frames (RSI needs
-    RSI_PERIOD+1 bars, the 3h-change bubble needs 3 more on top of that)."""
+    most recent candle), or None if any of the 6 tickers doesn't have
+    enough history to compute at least 2 real frames (RSI needs
+    RSI_PERIOD+1 bars, the 3-candle-change bubble needs 3 more on top)."""
     by_ticker = {a["ticker"]: a for a in assets if not a.get("unavailable")}
     per_ticker_records = {}
     for ticker, _display_name in EQUILIBRIUM_TICKERS:
         a = by_ticker.get(ticker)
-        hourly = a.get("hourly_ohlc") if a else None
-        if not hourly or len(hourly) < RSI_PERIOD + 1 + 3:
+        series = a.get(ohlc_key) if a else None
+        if not series or len(series) < RSI_PERIOD + 1 + 3:
             return None
-        closes = [c["close"] for c in hourly]
+        closes = [c["close"] for c in series]
         rsi_vals = rsi_series(closes)
-        records = []  # oldest -> newest; only hours where both RSI and a 3h-change are defined
+        records = []  # oldest -> newest; only candles where both RSI and a 3-candle change are defined
         for idx in range(3, len(closes)):
             if rsi_vals[idx] is None:
                 continue
             base = closes[idx - 3]
-            pct3h = ((closes[idx] - base) / base * 100) if base else None
-            records.append({"ts": hourly[idx].get("ts"), "rsi": rsi_vals[idx], "pct3h": pct3h})
+            pct3 = ((closes[idx] - base) / base * 100) if base else None
+            records.append({"ts": series[idx].get("ts"), "rsi": rsi_vals[idx], "pct3": pct3})
         if len(records) < 2:
             return None
         per_ticker_records[ticker] = records
 
-    frame_count = min(min(len(v) for v in per_ticker_records.values()), hours + 1)
+    frame_count = min(min(len(v) for v in per_ticker_records.values()), periods + 1)
     frames = []
     for offset in range(frame_count):
-        pos_from_end = frame_count - 1 - offset  # 0 = current hour, larger = further back
+        pos_from_end = frame_count - 1 - offset  # 0 = most recent candle, larger = further back
         frame_pcts = {}
         raw_rows = {}
         for ticker, _display_name in EQUILIBRIUM_TICKERS:
             rec = per_ticker_records[ticker][-(pos_from_end + 1)]
             raw_rows[ticker] = rec
-            if rec["pct3h"] is not None:
-                frame_pcts[ticker] = abs(rec["pct3h"])
+            if rec["pct3"] is not None:
+                frame_pcts[ticker] = abs(rec["pct3"])
         radii = compute_relative_bubble_radii_from_pcts(frame_pcts)
 
         frame_assets = []
@@ -1461,12 +1560,12 @@ def build_equilibrium_history(assets, hours=EQUILIBRIUM_HISTORY_HOURS):
             rec = raw_rows[ticker]
             x = max(-1.0, min(1.0, (rec["rsi"] - 50.0) / 50.0))
             frame_assets.append({
-                "id": _eq_dom_id(ticker),
+                "id": f"{id_prefix}{_eq_dom_id(ticker)}",
                 "ticker": ticker,
                 "name": display_name,
                 "rsi": round(rec["rsi"], 1),
                 "x": round(x, 4),
-                "pct3h": None if rec["pct3h"] is None else round(rec["pct3h"], 3),
+                "pct3": None if rec["pct3"] is None else round(rec["pct3"], 3),
                 "bubble_r": round(radii.get(ticker, RSI_BUBBLE_MIN_R), 3),
                 "color": equilibrium_color_for_x(x),
             })
@@ -1474,10 +1573,27 @@ def build_equilibrium_history(assets, hours=EQUILIBRIUM_HISTORY_HOURS):
                 ts_candidates.append(rec["ts"])
         frame_ts = max(ts_candidates) if ts_candidates else None
         frames.append({
-            "ts": frame_ts.strftime("%Y-%m-%d %H:%M UTC") if frame_ts else None,
+            "ts": frame_ts.strftime(ts_format) if frame_ts else None,
             "assets": frame_assets,
         })
     return {"frames": frames}
+
+
+def build_equilibrium_history(assets, hours=EQUILIBRIUM_HISTORY_HOURS):
+    """Hourly replay -- see _build_equilibrium_frames() for the shared
+    logic. Bubble sizing is the inverse of |% change over the prior 3
+    HOURLY candles|, relative to the other 5 tickers at that same hour."""
+    return _build_equilibrium_frames(assets, "hourly_ohlc", hours, "h-", "%Y-%m-%d %H:%M UTC")
+
+
+def build_equilibrium_history_daily(assets, days=EQUILIBRIUM_HISTORY_DAYS):
+    """Daily replay -- see _build_equilibrium_frames() for the shared
+    logic. Bubble sizing is the inverse of |% change over the prior 3 DAILY
+    closes|, relative to the other 5 tickers on that same day -- an
+    independent normalization scope from the hourly panel (and from every
+    other bubble-sizing scope in this report); none of these are on a
+    shared scale with each other."""
+    return _build_equilibrium_frames(assets, "daily_ohlc", days, "d-", "%Y-%m-%d")
 
 
 def _eq_well_y(x_norm, height, base_frac=0.28, amp_frac=0.42):
@@ -1492,12 +1608,14 @@ EQUILIBRIUM_SVG_WIDTH = 900
 EQUILIBRIUM_SVG_HEIGHT = 380
 
 
-def render_equilibrium_svg(frame_assets, width=EQUILIBRIUM_SVG_WIDTH, height=EQUILIBRIUM_SVG_HEIGHT):
-    """SVG scene for one frame (a real hourly snapshot -- see
-    build_equilibrium_history), with each bubble/label/RSI-text tagged by a
-    stable per-ticker id so the slider's JS can reposition them for other
-    frames without re-rendering the whole SVG (only the well curve and axis
-    labels are truly static; everything else is script-updatable)."""
+def render_equilibrium_svg(frame_assets, width=EQUILIBRIUM_SVG_WIDTH, height=EQUILIBRIUM_SVG_HEIGHT,
+                            lookback_desc="recent history"):
+    """SVG scene for one frame (a real hourly-or-daily snapshot -- see
+    _build_equilibrium_frames), with each bubble/label/RSI-text tagged by a
+    stable per-ticker id (already scoped by panel, e.g. "h-ZNF"/"d-ZNF") so
+    the slider's JS can reposition them for other frames without
+    re-rendering the whole SVG (only the well curve and axis labels are
+    truly static; everything else is script-updatable)."""
     cx = width / 2
     scale_x = width * 0.44
     top_margin = height * 0.30
@@ -1548,7 +1666,7 @@ def render_equilibrium_svg(frame_assets, width=EQUILIBRIUM_SVG_WIDTH, height=EQU
 
     return (
         f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet" role="img" '
-        f'aria-label="Equilibrium RSI, scrub the slider to replay the last {EQUILIBRIUM_HISTORY_HOURS} hours">'
+        f'aria-label="Equilibrium RSI, scrub the slider to replay {html.escape(lookback_desc)}">'
         f'{"".join(parts)}</svg>'
     )
 
@@ -1570,13 +1688,19 @@ EQUILIBRIUM_CSS = """
   #app h1{font-size:22px; font-weight:600; letter-spacing:-0.01em; margin-top:2px;}
   #app .status{font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim); text-align:right; line-height:1.6;}
   #app .status b{color:var(--cyan); font-weight:500;}
-  #app main{flex:1; display:flex; min-height:0; flex-wrap:wrap;}
-  #app #stage-wrap{flex:1 1 560px; position:relative; min-width:0; padding:16px; display:flex; flex-direction:column; gap:10px;}
-  #app #stage-wrap svg{display:block; width:100%; height:auto;}
-  #app #stage-wrap svg .eq-bubble{ transition: cx 0.35s ease, cy 0.35s ease, r 0.35s ease, fill 0.35s ease, stroke 0.35s ease; }
-  #app #stage-wrap svg .eq-label,
-  #app #stage-wrap svg .eq-rsi{ transition: x 0.35s ease, y 0.35s ease, fill 0.35s ease; }
-  #app #hud{ display:flex; justify-content:space-between; padding:0 8px;
+  #app main{flex:1; display:flex; flex-direction:column; min-height:0;}
+  #app .eq-section-head{ padding:16px 28px 0; }
+  #app .eq-section-head h2{ font-family:'IBM Plex Mono',monospace; font-size:12px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--dim); font-weight:600; }
+  #app .eq-divider{ height:1px; background:var(--line); margin:20px 28px 0; }
+  #app .eq-unavailable{ padding:20px 28px 28px; color:var(--dim); font-family:'IBM Plex Mono',monospace; font-size:13px; }
+  #app .eq-row{flex:1; display:flex; min-height:0; flex-wrap:wrap;}
+  #app .stage-wrap{flex:1 1 560px; position:relative; min-width:0; padding:16px; display:flex; flex-direction:column; gap:10px;}
+  #app .stage-wrap svg{display:block; width:100%; height:auto;}
+  #app .stage-wrap svg .eq-bubble{ transition: cx 0.35s ease, cy 0.35s ease, r 0.35s ease, fill 0.35s ease, stroke 0.35s ease; }
+  #app .stage-wrap svg .eq-label,
+  #app .stage-wrap svg .eq-rsi{ transition: x 0.35s ease, y 0.35s ease, fill 0.35s ease; }
+  #app .hud{ display:flex; justify-content:space-between; padding:0 8px;
     font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim); }
   #app .side-label{display:flex; flex-direction:column; gap:2px;}
   #app .side-label .n{font-size:22px; font-weight:600;}
@@ -1584,16 +1708,16 @@ EQUILIBRIUM_CSS = """
   #app .side-label.right{text-align:right; color:var(--green);}
   #app .side-label.left .n{color:var(--red);}
   #app .side-label.right .n{color:var(--green);}
-  #app #scrubber{ padding:4px 12px 0; display:flex; flex-direction:column; gap:6px; }
-  #app #scrubber .scrub-row{ display:flex; align-items:center; gap:12px; }
-  #app #scrubber input[type=range]{ flex:1; -webkit-appearance:none; height:3px; background:var(--line); border-radius:2px; outline:none; }
-  #app #scrubber input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
-  #app #scrubber input[type=range]::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
-  #app #scrubLabel{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--cyan); white-space:nowrap; min-width:9ch; text-align:right; }
-  #app #scrubTs{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--dim); text-align:center; }
+  #app .scrubber{ padding:4px 12px 0; display:flex; flex-direction:column; gap:6px; }
+  #app .scrubber .scrub-row{ display:flex; align-items:center; gap:12px; }
+  #app .scrubber input[type=range]{ flex:1; -webkit-appearance:none; height:3px; background:var(--line); border-radius:2px; outline:none; }
+  #app .scrubber input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
+  #app .scrubber input[type=range]::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
+  #app .scrubLabel{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--cyan); white-space:nowrap; min-width:9ch; text-align:right; }
+  #app .scrubTs{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--dim); text-align:center; }
   #app aside{ width:280px; flex-shrink:0; background:var(--panel); border-left:1px solid var(--line);
     padding:24px 22px; display:flex; flex-direction:column; gap:16px; }
-  #app #legend{display:flex; flex-direction:column; gap:6px;}
+  #app .legend{display:flex; flex-direction:column; gap:6px;}
   #app .leg-row{display:flex; justify-content:space-between; align-items:center;
     font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 0; border-bottom:1px solid var(--line);}
   #app .leg-row .dot{width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:8px;}
@@ -1608,29 +1732,39 @@ EQUILIBRIUM_CSS = """
 """
 
 
-def _equilibrium_slider_script(frames, dom_ids):
-    """JS that replays real precomputed hourly frames as the slider moves --
-    no physics, no randomness, no invented values: every position it can
-    show is one of the `frames` computed by build_equilibrium_history. CSS
+def _equilibrium_slider_script(frames, dom_ids, *, scope, width, height, current_label, ago_suffix, pct_suffix):
+    """JS that replays real precomputed frames as the slider moves -- no
+    physics, no randomness, no invented values: every position it can show
+    is one of the `frames` computed by _build_equilibrium_frames(). CSS
     transitions (see EQUILIBRIUM_CSS's .eq-bubble/.eq-label/.eq-rsi rules)
-    are what make moving the slider feel animated instead of a hard cut."""
+    are what make moving the slider feel animated instead of a hard cut.
+
+    Wrapped in an IIFE, and every DOM id it looks up is suffixed with
+    `scope` ("h" for hourly, "d" for daily), so the hourly and daily panels
+    can both be inlined on the same page without their scripts' top-level
+    consts or their element ids colliding."""
     frames_json = json.dumps(frames)
     ids_json = json.dumps(dom_ids)
+    current_label_json = json.dumps(current_label)
+    ago_suffix_json = json.dumps(ago_suffix)
+    pct_suffix_json = json.dumps(pct_suffix)
     return f"""
+(function() {{
   const EQ_FRAMES = {frames_json};
   const EQ_IDS = {ids_json};
-  const EQ_W = {EQUILIBRIUM_SVG_WIDTH}, EQ_H = {EQUILIBRIUM_SVG_HEIGHT};
+  const EQ_W = {width}, EQ_H = {height};
   const EQ_CX = EQ_W / 2, EQ_SCALE_X = EQ_W * 0.44, EQ_TOP = EQ_H * 0.30;
   function eqWellY(xn){{ const depth = 1 - xn*xn; return EQ_H*0.28 + depth*EQ_H*0.42; }}
   function eqPxOf(x){{ return EQ_CX + x*EQ_SCALE_X; }}
   function eqPyOf(x, r){{ return EQ_TOP + eqWellY(x) - 10 - r; }}
 
-  const slider = document.getElementById('hourSlider');
-  const scrubLabel = document.getElementById('scrubLabel');
-  const scrubTs = document.getElementById('scrubTs');
-  const leftCountEl = document.getElementById('leftCount');
-  const rightCountEl = document.getElementById('rightCount');
-  const legendEl = document.getElementById('legend');
+  const slider = document.getElementById('slider-{scope}');
+  const scrubLabel = document.getElementById('scrubLabel-{scope}');
+  const scrubTs = document.getElementById('scrubTs-{scope}');
+  const leftCountEl = document.getElementById('leftCount-{scope}');
+  const rightCountEl = document.getElementById('rightCount-{scope}');
+  const legendEl = document.getElementById('legend-{scope}');
+  if (!slider) return;
 
   function renderFrame(frameIdx){{
     const frame = EQ_FRAMES[frameIdx];
@@ -1651,10 +1785,10 @@ def _equilibrium_slider_script(frames, dom_ids):
     leftCountEl.textContent = left;
     rightCountEl.textContent = right;
     scrubTs.textContent = frame.ts ? ('Showing: ' + frame.ts) : 'Showing: n/a';
-    const hoursAgo = EQ_FRAMES.length - 1 - frameIdx;
-    scrubLabel.textContent = hoursAgo === 0 ? 'Current hour' : (hoursAgo + 'h ago');
+    const periodsAgo = EQ_FRAMES.length - 1 - frameIdx;
+    scrubLabel.textContent = periodsAgo === 0 ? {current_label_json} : (periodsAgo + {ago_suffix_json});
     const rows = frame.assets.slice().sort((a, b) => b.rsi - a.rsi).map(a => {{
-      const pctStr = (a.pct3h === null || a.pct3h === undefined) ? 'n/a' : (a.pct3h >= 0 ? '+' : '') + a.pct3h.toFixed(2) + '% 3h';
+      const pctStr = (a.pct3 === null || a.pct3 === undefined) ? 'n/a' : (a.pct3 >= 0 ? '+' : '') + a.pct3.toFixed(2) + {pct_suffix_json};
       return '<div class="leg-row"><span><span class="dot" style="background:' + a.color + '"></span>' + a.name +
         '</span><span><span class="rsi" style="color:' + a.color + '">' + Math.round(a.rsi) +
         '</span><span class="pct">' + pctStr + '</span></span></div>';
@@ -1664,92 +1798,146 @@ def _equilibrium_slider_script(frames, dom_ids):
 
   slider.addEventListener('input', () => renderFrame(+slider.value));
   renderFrame(+slider.value);
+}})();
 """
+
+
+def _render_equilibrium_panel(history, *, scope, section_title, section_note, current_label,
+                               ago_suffix, pct_suffix, lookback_word, unavailable_msg):
+    """Build one scrubbable panel (section heading + stage/slider + legend/
+    note, plus its own IIFE-wrapped <script>) for either the hourly or the
+    daily Equilibrium view. `scope` ("h"/"d") keeps every element id in this
+    panel distinct from the other one so both can sit in the same #app
+    without colliding."""
+    if history is None:
+        return f"""
+    <div class="eq-section-head"><h2>{html.escape(section_title)}</h2></div>
+    <div class="eq-unavailable">{html.escape(unavailable_msg)}</div>"""
+
+    frames = history["frames"]
+    current = frames[-1]
+    max_back = len(frames) - 1
+    dom_ids = [a["id"] for a in current["assets"]]
+    lookback_desc = f"the last {max_back} {lookback_word}{'s' if max_back != 1 else ''}"
+    svg = render_equilibrium_svg(current["assets"], lookback_desc=lookback_desc)
+
+    def _eq_legend_row(a):
+        pct_str = "n/a" if a["pct3"] is None else f'{a["pct3"]:+.2f}{pct_suffix}'
+        return (
+            f'<div class="leg-row"><span><span class="dot" style="background:{a["color"]}"></span>'
+            f'{html.escape(a["name"])}</span>'
+            f'<span><span class="rsi" style="color:{a["color"]}">{a["rsi"]:.0f}</span>'
+            f'<span class="pct">{pct_str}</span></span></div>'
+        )
+
+    legend_html = "".join(
+        _eq_legend_row(a) for a in sorted(current["assets"], key=lambda a: a["rsi"], reverse=True)
+    )
+    left_count = sum(1 for a in current["assets"] if a["x"] < -0.02)
+    right_count = sum(1 for a in current["assets"] if a["x"] > 0.02)
+    script = _equilibrium_slider_script(
+        frames, dom_ids, scope=scope, width=EQUILIBRIUM_SVG_WIDTH, height=EQUILIBRIUM_SVG_HEIGHT,
+        current_label=current_label, ago_suffix=ago_suffix, pct_suffix=pct_suffix,
+    )
+
+    return f"""
+    <div class="eq-section-head"><h2>{html.escape(section_title)}</h2></div>
+    <div class="eq-row">
+      <div class="stage-wrap">
+        {svg}
+        <div class="hud">
+          <div class="side-label left">OVERSOLD (RSI &lt; 50)<div class="n" id="leftCount-{scope}">{left_count}</div></div>
+          <div class="side-label right">OVERBOUGHT (RSI &gt; 50)<div class="n" id="rightCount-{scope}">{right_count}</div></div>
+        </div>
+        <div class="scrubber">
+          <div class="scrub-row">
+            <input type="range" id="slider-{scope}" min="0" max="{max_back}" value="{max_back}">
+            <span class="scrubLabel" id="scrubLabel-{scope}">{html.escape(current_label)}</span>
+          </div>
+          <div class="scrubTs" id="scrubTs-{scope}">Showing: {html.escape(current["ts"] or "n/a")}</div>
+        </div>
+      </div>
+      <aside>
+        <div class="legend" id="legend-{scope}">{legend_html}</div>
+        <div class="note">{section_note}</div>
+      </aside>
+    </div>
+<script>{script}</script>"""
 
 
 def render_equilibrium_app(assets, now, embedded=False):
     """Build the `<div id="app">...</div>` markup for the Equilibrium -- RSI
-    Reversion view: a real-data hour-by-hour replay (slider from
-    EQUILIBRIUM_HISTORY_HOURS hours ago to the current hour), each of the 6
-    core assets plotted at that hour's real RSI, end bubble sized relative
-    to the other 5 AT THAT HOUR. No simulated/invented motion anywhere --
-    every slider position shows an actual past reading; client-side JS only
-    looks up the frame for the slider's position and moves elements to
-    match (a CSS transition makes that read as motion, not a jump cut).
+    Reversion view: TWO real-data scrubbable panels stacked in the same
+    app -- an hourly one (slider from EQUILIBRIUM_HISTORY_HOURS hours ago to
+    the current hour) and a daily one below it (slider from
+    EQUILIBRIUM_HISTORY_DAYS trading days ago to today) -- each plotting the
+    same 6 core assets at that candle's real RSI, end bubble sized relative
+    to the other 5 AT THAT SAME CANDLE. No simulated/invented motion
+    anywhere -- every slider position on either panel shows an actual past
+    reading; client-side JS only looks up the frame for the slider's
+    position and moves elements to match (a CSS transition makes that read
+    as motion, not a jump cut). The two panels' bubble sizing is computed
+    independently (hourly 3-candle vs. daily 3-candle), so they are never on
+    a shared scale with each other.
 
     `embedded=True` drops the "back to report" link (pointless when this is
-    already part of the same page) and gives the panel a fixed height that
+    already part of the same page) and gives the app a fixed height that
     fits inside a scrolling page instead of claiming the full viewport.
     Returns just the markup -- EQUILIBRIUM_CSS (scoped entirely under
     `#app`, safe to concatenate into any page's <style>) is a separate
     constant so callers embedding this include it in their own <style> tag
     exactly once."""
     as_of = now.strftime("%Y-%m-%d %H:%M UTC")
-    history = build_equilibrium_history(assets)
     min_height = "560px" if embedded else "100vh"
     nav_html = "" if embedded else '<a class="back-link" href="index.html">&larr; Back to report</a>'
 
-    if history is None:
-        body = f"""
-    <div style="padding:60px 28px; color:var(--dim); font-family:'IBM Plex Mono',monospace; font-size:13px;">
-      Live RSI history wasn't fully available for all 6 assets this run ({html.escape(as_of)}).
-      This page will populate on the next hourly run once every asset has enough hourly bars.
-    </div>"""
-    else:
-        frames = history["frames"]
-        current = frames[-1]
-        max_hours_back = len(frames) - 1
-        dom_ids = [a["id"] for a in current["assets"]]
-        svg = render_equilibrium_svg(current["assets"])
+    hourly_history = build_equilibrium_history(assets)
+    hourly_back = (len(hourly_history["frames"]) - 1) if hourly_history else EQUILIBRIUM_HISTORY_HOURS
+    hourly_note = (
+        "Six assets — <b>DXY, Bonds, SPY, NASDAQ, GOLD, WTI Crude</b> — plotted "
+        f"by real hourly <b>RSI(14)</b>. Drag the slider to replay the last "
+        f"{hourly_back} hours, hour by hour — every position is an actual "
+        "past reading pulled from real hourly closes, not invented or "
+        "simulated motion. RSI 50 is equilibrium; the well steepens toward 0 "
+        "and 100. <b>Green</b> = overbought side. <b>Red</b> = oversold side."
+        "<br><br>"
+        "Each bubble's size is the inverse of that asset's |% change over the "
+        "prior 3 hourly candles|, <b>relative to the other five at that same "
+        "hour</b> — the quietest of the six that hour gets the biggest "
+        "bubble, the most volatile gets the smallest."
+    )
+    hourly_panel = _render_equilibrium_panel(
+        hourly_history, scope="h", section_title="Hourly", section_note=hourly_note,
+        current_label="Current hour", ago_suffix="h ago", pct_suffix="% 3h", lookback_word="hour",
+        unavailable_msg=(
+            f"Live hourly RSI history wasn't fully available for all 6 assets this run ({as_of}). "
+            "This panel will populate on the next hourly run once every asset has enough hourly bars."
+        ),
+    )
 
-        def _eq_legend_row(a):
-            pct_str = "n/a" if a["pct3h"] is None else f'{a["pct3h"]:+.2f}% 3h'
-            return (
-                f'<div class="leg-row"><span><span class="dot" style="background:{a["color"]}"></span>'
-                f'{html.escape(a["name"])}</span>'
-                f'<span><span class="rsi" style="color:{a["color"]}">{a["rsi"]:.0f}</span>'
-                f'<span class="pct">{pct_str}</span></span></div>'
-            )
-
-        legend_html = "".join(
-            _eq_legend_row(a) for a in sorted(current["assets"], key=lambda a: a["rsi"], reverse=True)
-        )
-        left_count = sum(1 for a in current["assets"] if a["x"] < -0.02)
-        right_count = sum(1 for a in current["assets"] if a["x"] > 0.02)
-        script = _equilibrium_slider_script(frames, dom_ids)
-
-        body = f"""
-    <div id="stage-wrap">
-      {svg}
-      <div id="hud">
-        <div class="side-label left">OVERSOLD (RSI &lt; 50)<div class="n" id="leftCount">{left_count}</div></div>
-        <div class="side-label right">OVERBOUGHT (RSI &gt; 50)<div class="n" id="rightCount">{right_count}</div></div>
-      </div>
-      <div id="scrubber">
-        <div class="scrub-row">
-          <input type="range" id="hourSlider" min="0" max="{max_hours_back}" value="{max_hours_back}">
-          <span id="scrubLabel">Current hour</span>
-        </div>
-        <div id="scrubTs">Showing: {html.escape(current["ts"] or "n/a")}</div>
-      </div>
-    </div>
-    <aside>
-      <div id="legend">{legend_html}</div>
-      <div class="note">
-        Six assets — <b>DXY, Bonds, SPY, NASDAQ, GOLD, WTI Crude</b> — plotted
-        by real hourly <b>RSI(14)</b>. Drag the slider to replay the last
-        {max_hours_back} hours, hour by hour — every position is an actual
-        past reading pulled from real hourly closes, not invented or
-        simulated motion. RSI 50 is equilibrium; the well steepens toward 0
-        and 100. <b>Green</b> = overbought side. <b>Red</b> = oversold side.
-        <br><br>
-        Each bubble's size is the inverse of that asset's |% change over the
-        prior 3 hourly candles|, <b>relative to the other five at that same
-        hour</b> — the quietest of the six that hour gets the biggest
-        bubble, the most volatile gets the smallest.
-      </div>
-    </aside>
-<script>{script}</script>"""
+    daily_history = build_equilibrium_history_daily(assets)
+    daily_back = (len(daily_history["frames"]) - 1) if daily_history else EQUILIBRIUM_HISTORY_DAYS
+    daily_note = (
+        "Same six assets, same <b>RSI(14)</b> math, but on <b>daily</b> "
+        f"closes instead of hourly ones. Drag the slider to replay the last "
+        f"{daily_back} trading days, day by day — every position is an "
+        "actual past reading pulled from real daily closes, never invented "
+        "or simulated."
+        "<br><br>"
+        "Each bubble's size is the inverse of that asset's |% change over "
+        "the prior 3 daily closes|, <b>relative to the other five on that "
+        "same day</b> — a separate normalization from the hourly panel "
+        "above (and from every other bubble-sizing scope in this report); "
+        "none of these are on a shared scale with each other."
+    )
+    daily_panel = _render_equilibrium_panel(
+        daily_history, scope="d", section_title="Daily", section_note=daily_note,
+        current_label="Today", ago_suffix="d ago", pct_suffix="% 3d", lookback_word="day",
+        unavailable_msg=(
+            f"Live daily RSI history wasn't fully available for all 6 assets this run ({as_of}). "
+            "This panel will populate once every asset has enough daily bars."
+        ),
+    )
 
     return f"""<div id="app" style="min-height:{min_height};">
   <header>
@@ -1762,7 +1950,8 @@ def render_equilibrium_app(assets, now, embedded=False):
       {nav_html}
     </div>
   </header>
-  <main>{body}
+  <main>{hourly_panel}
+    <div class="eq-divider"></div>{daily_panel}
   </main>
 </div>"""
 
