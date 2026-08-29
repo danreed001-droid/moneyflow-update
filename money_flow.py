@@ -1334,13 +1334,25 @@ def render_html(assets, now, futures=None):
 
     futures_card = render_futures_card(futures) if futures else ""
 
+    # Equilibrium view is embedded directly below the futures card on this
+    # same page (see #equilibrium below) rather than living only on its own
+    # equilibrium.html -- EQUILIBRIUM_CSS is scoped entirely under #app so
+    # concatenating it here can't collide with the report's own CSS above.
+    eq_app_html = render_equilibrium_app(assets, now, embedded=True)
+    equilibrium_section = (
+        '<div id="equilibrium" style="width:100%; max-width:1120px; '
+        'border-radius:16px; overflow:hidden;">'
+        f'{eq_app_html}</div>'
+    )
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cross-Asset Money Flow — As of {esc(as_of)}</title>
-<style>{CSS}</style>
+<style>{CSS}
+{EQUILIBRIUM_CSS}</style>
 </head>
 <body>
 <div class="viz-root">
@@ -1352,7 +1364,7 @@ def render_html(assets, now, futures=None):
         <p class="subtitle">Where money is moving right now across equities, bonds, the dollar, gold and bitcoin — over the last 3 hours, 3 days, and 30 days.</p>
       </div>
       <div style="display:flex; gap:8px; align-items:flex-start;">
-        <a class="theme-toggle" href="equilibrium.html" style="text-decoration:none; display:inline-block;">Equilibrium view</a>
+        <a class="theme-toggle" href="#equilibrium" style="text-decoration:none; display:inline-block;">Equilibrium view &darr;</a>
         <button class="theme-toggle" id="themeToggle" type="button">Dark mode</button>
       </div>
     </div>
@@ -1378,7 +1390,7 @@ def render_html(assets, now, futures=None):
     </details>
     <p class="note">Automated informational snapshot from the moneyflow GitHub Actions feed — not financial advice.{note_extra}</p>
   </div>
-{futures_card}</div>
+{futures_card}{equilibrium_section}</div>
 </div>
 <script>{SCRIPT}</script>
 </body>
@@ -1542,55 +1554,57 @@ def render_equilibrium_svg(frame_assets, width=EQUILIBRIUM_SVG_WIDTH, height=EQU
 
 
 EQUILIBRIUM_CSS = """
-  :root{ --bg:#0B0E14; --well:#3A4A5C; --neutral:#9CA3AF; --cyan:#4FD8E8;
+  #app{
+    --bg:#0B0E14; --well:#3A4A5C; --neutral:#9CA3AF; --cyan:#4FD8E8;
     --red:#FF5C5C; --green:#3ECF8E; --ink:#E8E6DE; --dim:#6B7280;
-    --panel:#111621; --line:#1E2633; }
-  *{box-sizing:border-box; margin:0; padding:0;}
-  html,body{background:var(--bg); color:var(--ink); font-family:'Space Grotesk',sans-serif;}
-  .mono{font-family:'IBM Plex Mono',monospace;}
-  #app{display:flex; flex-direction:column; min-height:100vh;}
-  header{ padding:20px 28px 14px; display:flex; align-items:baseline;
+    --panel:#111621; --line:#1E2633;
+    display:flex; flex-direction:column; background:var(--bg); color:var(--ink);
+    font-family:'Space Grotesk',sans-serif;
+  }
+  #app, #app *{box-sizing:border-box; margin:0; padding:0;}
+  #app .mono{font-family:'IBM Plex Mono',monospace;}
+  #app header{ padding:20px 28px 14px; display:flex; align-items:baseline;
     justify-content:space-between; border-bottom:1px solid var(--line); flex-shrink:0; flex-wrap:wrap; gap:8px;}
-  .eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.18em;
+  #app .eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.18em;
     color:var(--cyan); text-transform:uppercase; }
-  h1{font-size:22px; font-weight:600; letter-spacing:-0.01em; margin-top:2px;}
-  .status{font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim); text-align:right; line-height:1.6;}
-  .status b{color:var(--cyan); font-weight:500;}
-  main{flex:1; display:flex; min-height:0; flex-wrap:wrap;}
-  #stage-wrap{flex:1 1 560px; position:relative; min-width:0; padding:16px; display:flex; flex-direction:column; gap:10px;}
-  #stage-wrap svg{display:block; width:100%; height:auto;}
-  #stage-wrap svg .eq-bubble{ transition: cx 0.35s ease, cy 0.35s ease, r 0.35s ease, fill 0.35s ease, stroke 0.35s ease; }
-  #stage-wrap svg .eq-label,
-  #stage-wrap svg .eq-rsi{ transition: x 0.35s ease, y 0.35s ease, fill 0.35s ease; }
-  #hud{ display:flex; justify-content:space-between; padding:0 8px;
+  #app h1{font-size:22px; font-weight:600; letter-spacing:-0.01em; margin-top:2px;}
+  #app .status{font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim); text-align:right; line-height:1.6;}
+  #app .status b{color:var(--cyan); font-weight:500;}
+  #app main{flex:1; display:flex; min-height:0; flex-wrap:wrap;}
+  #app #stage-wrap{flex:1 1 560px; position:relative; min-width:0; padding:16px; display:flex; flex-direction:column; gap:10px;}
+  #app #stage-wrap svg{display:block; width:100%; height:auto;}
+  #app #stage-wrap svg .eq-bubble{ transition: cx 0.35s ease, cy 0.35s ease, r 0.35s ease, fill 0.35s ease, stroke 0.35s ease; }
+  #app #stage-wrap svg .eq-label,
+  #app #stage-wrap svg .eq-rsi{ transition: x 0.35s ease, y 0.35s ease, fill 0.35s ease; }
+  #app #hud{ display:flex; justify-content:space-between; padding:0 8px;
     font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim); }
-  .side-label{display:flex; flex-direction:column; gap:2px;}
-  .side-label .n{font-size:22px; font-weight:600;}
-  .side-label.left{text-align:left; color:var(--red);}
-  .side-label.right{text-align:right; color:var(--green);}
-  .side-label.left .n{color:var(--red);}
-  .side-label.right .n{color:var(--green);}
-  #scrubber{ padding:4px 12px 0; display:flex; flex-direction:column; gap:6px; }
-  #scrubber .scrub-row{ display:flex; align-items:center; gap:12px; }
-  #scrubber input[type=range]{ flex:1; -webkit-appearance:none; height:3px; background:var(--line); border-radius:2px; outline:none; }
-  #scrubber input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
-  #scrubber input[type=range]::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
-  #scrubLabel{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--cyan); white-space:nowrap; min-width:9ch; text-align:right; }
-  #scrubTs{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--dim); text-align:center; }
-  aside{ width:280px; flex-shrink:0; background:var(--panel); border-left:1px solid var(--line);
+  #app .side-label{display:flex; flex-direction:column; gap:2px;}
+  #app .side-label .n{font-size:22px; font-weight:600;}
+  #app .side-label.left{text-align:left; color:var(--red);}
+  #app .side-label.right{text-align:right; color:var(--green);}
+  #app .side-label.left .n{color:var(--red);}
+  #app .side-label.right .n{color:var(--green);}
+  #app #scrubber{ padding:4px 12px 0; display:flex; flex-direction:column; gap:6px; }
+  #app #scrubber .scrub-row{ display:flex; align-items:center; gap:12px; }
+  #app #scrubber input[type=range]{ flex:1; -webkit-appearance:none; height:3px; background:var(--line); border-radius:2px; outline:none; }
+  #app #scrubber input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
+  #app #scrubber input[type=range]::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:var(--cyan); cursor:pointer; border:2px solid var(--bg); }
+  #app #scrubLabel{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--cyan); white-space:nowrap; min-width:9ch; text-align:right; }
+  #app #scrubTs{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--dim); text-align:center; }
+  #app aside{ width:280px; flex-shrink:0; background:var(--panel); border-left:1px solid var(--line);
     padding:24px 22px; display:flex; flex-direction:column; gap:16px; }
-  #legend{display:flex; flex-direction:column; gap:6px;}
-  .leg-row{display:flex; justify-content:space-between; align-items:center;
+  #app #legend{display:flex; flex-direction:column; gap:6px;}
+  #app .leg-row{display:flex; justify-content:space-between; align-items:center;
     font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 0; border-bottom:1px solid var(--line);}
-  .leg-row .dot{width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:8px;}
-  .leg-row .rsi{font-weight:600;}
-  .leg-row .pct{color:var(--dim); font-size:10.5px; margin-left:8px;}
-  .note{font-size:11.5px; color:var(--dim); line-height:1.6; padding-top:6px; border-top:1px solid var(--line);}
-  .note b{color:var(--ink);}
-  .back-link{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim);
+  #app .leg-row .dot{width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:8px;}
+  #app .leg-row .rsi{font-weight:600;}
+  #app .leg-row .pct{color:var(--dim); font-size:10.5px; margin-left:8px;}
+  #app .note{font-size:11.5px; color:var(--dim); line-height:1.6; padding-top:6px; border-top:1px solid var(--line);}
+  #app .note b{color:var(--ink);}
+  #app .back-link{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim);
     text-decoration:none; border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
-  .back-link:hover{ color:var(--cyan); border-color:var(--cyan); }
-  @media (max-width: 760px){ aside{ width:100%; border-left:none; border-top:1px solid var(--line);} }
+  #app .back-link:hover{ color:var(--cyan); border-color:var(--cyan); }
+  @media (max-width: 760px){ #app aside{ width:100%; border-left:none; border-top:1px solid var(--line);} }
 """
 
 
@@ -1653,17 +1667,27 @@ def _equilibrium_slider_script(frames, dom_ids):
 """
 
 
-def generate_equilibrium_html(assets, now):
-    """Build the Equilibrium -- RSI Reversion page: a real-data hour-by-hour
-    replay (slider from EQUILIBRIUM_HISTORY_HOURS hours ago to the current
-    hour) with each of the 6 core assets plotted at that hour's real RSI,
-    and an end bubble sized relative to the other 5 AT THAT HOUR. There is
-    no simulated/invented motion anywhere -- every slider position shows an
-    actual past reading; the only thing client-side JS does is look up the
-    frame for the slider's position and move elements to match (with a CSS
-    transition so it reads as motion rather than a jump cut)."""
+def render_equilibrium_app(assets, now, embedded=False):
+    """Build the `<div id="app">...</div>` markup for the Equilibrium -- RSI
+    Reversion view: a real-data hour-by-hour replay (slider from
+    EQUILIBRIUM_HISTORY_HOURS hours ago to the current hour), each of the 6
+    core assets plotted at that hour's real RSI, end bubble sized relative
+    to the other 5 AT THAT HOUR. No simulated/invented motion anywhere --
+    every slider position shows an actual past reading; client-side JS only
+    looks up the frame for the slider's position and moves elements to
+    match (a CSS transition makes that read as motion, not a jump cut).
+
+    `embedded=True` drops the "back to report" link (pointless when this is
+    already part of the same page) and gives the panel a fixed height that
+    fits inside a scrolling page instead of claiming the full viewport.
+    Returns just the markup -- EQUILIBRIUM_CSS (scoped entirely under
+    `#app`, safe to concatenate into any page's <style>) is a separate
+    constant so callers embedding this include it in their own <style> tag
+    exactly once."""
     as_of = now.strftime("%Y-%m-%d %H:%M UTC")
     history = build_equilibrium_history(assets)
+    min_height = "560px" if embedded else "100vh"
+    nav_html = "" if embedded else '<a class="back-link" href="index.html">&larr; Back to report</a>'
 
     if history is None:
         body = f"""
@@ -1727,6 +1751,27 @@ def generate_equilibrium_html(assets, now):
     </aside>
 <script>{script}</script>"""
 
+    return f"""<div id="app" style="min-height:{min_height};">
+  <header>
+    <div>
+      <div class="eyebrow">RSI Reversion</div>
+      <h1>Equilibrium</h1>
+    </div>
+    <div class="status mono">
+      N = 6 assets · generated {html.escape(as_of)}<br>
+      {nav_html}
+    </div>
+  </header>
+  <main>{body}
+  </main>
+</div>"""
+
+
+def generate_equilibrium_html(assets, now):
+    """Standalone Equilibrium page (own doctype/head/body) -- same content
+    as the block embedded at the bottom of the main report by render_html(),
+    just as its own full document for direct linking / GitHub Pages."""
+    app_html = render_equilibrium_app(assets, now, embedded=False)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1735,23 +1780,12 @@ def generate_equilibrium_html(assets, now):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>{EQUILIBRIUM_CSS}</style>
+<style>{EQUILIBRIUM_CSS}
+  body{{ margin:0; background:#0B0E14; }}
+</style>
 </head>
 <body>
-<div id="app">
-  <header>
-    <div>
-      <div class="eyebrow">RSI Reversion</div>
-      <h1>Equilibrium</h1>
-    </div>
-    <div class="status mono">
-      N = 6 assets · generated {html.escape(as_of)}<br>
-      <a class="back-link" href="index.html">&larr; Back to report</a>
-    </div>
-  </header>
-  <main>{body}
-  </main>
-</div>
+{app_html}
 </body>
 </html>
 """
