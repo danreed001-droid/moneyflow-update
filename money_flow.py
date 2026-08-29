@@ -151,8 +151,10 @@ def ohlc_list_from_hist(hist):
             ts = ts.tz_convert("UTC") if ts.tzinfo is not None else ts.tz_localize("UTC")
         except Exception:
             pass
+        volume = getattr(r, "Volume", None)
         out.append({
             "open": float(r.Open), "high": float(r.High), "low": float(r.Low), "close": float(r.Close),
+            "volume": float(volume) if volume is not None and volume == volume else 0.0,  # nan != nan
             "ts": ts,
         })
     return out
@@ -185,8 +187,10 @@ def fetch_hourly_ohlc(ticker, hours=HOURLY_CANDLE_HOURS, period="90d"):
                 ts = ts.tz_convert("UTC") if ts.tzinfo is not None else ts.tz_localize("UTC")
             except Exception:
                 pass
+            volume = getattr(r, "Volume", None)
             out.append({
                 "open": float(r.Open), "high": float(r.High), "low": float(r.Low), "close": float(r.Close),
+                "volume": float(volume) if volume is not None and volume == volume else 0.0,  # nan != nan
                 "ts": ts,
             })
         return out
@@ -250,6 +254,58 @@ FUTURES = [
 ]
 
 FUTURES_CATEGORY_ORDER = ["Equity Index", "Treasuries", "Metals", "Energy", "Agriculture", "Livestock", "Softs"]
+
+# Contract multiplier ($ per 1.00 of quoted price) for every futures symbol
+# in ASSETS/FUTURES -- REQUIRED to turn volume*close into a true dollar-volume
+# figure. Without this, "dollar volume" silently compares apples to
+# oranges: e.g. ZN=F (10-Year T-Note) trades around 111 while ES=F trades
+# around 5600, so naive volume*close makes one of the world's most liquid
+# futures contracts (backing the ~$27T Treasury market) look like a small
+# fraction of the size of the S&P 500 futures market -- not because it's
+# smaller, but because Treasury futures are quoted in points on a $100,000
+# face value contract ($1,000/point) rather than as a per-share-equivalent
+# index level. BTC-USD and DX-Y.NYB aren't in this table: BTC-USD's close
+# is already a true per-unit USD price (multiplier 1, the default below),
+# and DX-Y.NYB has zero volume regardless (it's a spot/cash index, not a
+# traded contract) so its multiplier never matters.
+#
+# Confidence varies by group -- these are standard CME/ICE contract specs
+# and don't change day to day, but a few softs/grains contracts are quoted
+# in cents-per-unit on Yahoo (handled below by dividing the multiplier by
+# 100) and contract sizes have occasionally been redesigned (e.g. CME's
+# 2023 lumber contract resize), so treat the Agriculture/Livestock/Softs
+# entries as best-effort: if a specific symbol's bubble looks wildly out of
+# place on a real run, its multiplier here is the first thing to check
+# against CME/ICE's current contract specification.
+FUTURES_CONTRACT_MULTIPLIER = {
+    # -- Equity index: $X per index point --
+    "ES=F": 50, "YM=F": 5, "NQ=F": 20, "RTY=F": 50,
+    # -- Treasuries: $1,000 per point on $100,000 face value (ZT=F is on
+    # $200,000 face value, so $2,000/point) --
+    "ZB=F": 1000, "ZN=F": 1000, "ZF=F": 1000, "ZT=F": 2000,
+    # -- Metals: $X per point, X = troy oz per contract (quoted $/oz) --
+    "GC=F": 100, "MGC=F": 10, "SI=F": 5000, "SIL=F": 1000, "PL=F": 50, "PA=F": 100,
+    "HG=F": 25000,  # 25,000 lbs, quoted $/lb
+    # -- Energy: $X per point, X = contract size in the quoted unit --
+    "CL=F": 1000, "HO=F": 42000, "NG=F": 10000, "RB=F": 42000, "BZ=F": 1000, "B0=F": 42000,
+    # -- Grains/agriculture: contract size in bushels/cwt/tons, quoted
+    # cents/bushel or cents/lb on Yahoo for most of these -> divide the
+    # contract size by 100 to get $-per-quoted-unit (best-effort, see note above) --
+    "ZC=F": 5000 / 100, "ZO=F": 5000 / 100, "KE=F": 5000 / 100, "ZR=F": 2000,
+    "ZM=F": 100, "ZL=F": 60000 / 100, "ZS=F": 5000 / 100,
+    # -- Livestock: cents/lb on Yahoo --
+    "GF=F": 50000 / 100, "HE=F": 40000 / 100, "LE=F": 40000 / 100,
+    # -- Softs: mixed units (cents/lb except cocoa which is $/ton) --
+    "CC=F": 10, "KC=F": 37500 / 100, "CT=F": 50000 / 100, "LBS=F": 27500 / 100,
+    "OJ=F": 15000 / 100, "SB=F": 112000 / 100,
+}
+
+
+def contract_multiplier_for(ticker):
+    """$ per 1.00 of quoted close price for `ticker` -- see
+    FUTURES_CONTRACT_MULTIPLIER. Defaults to 1.0 (a true per-unit dollar
+    price, e.g. BTC-USD) for anything not in the table."""
+    return FUTURES_CONTRACT_MULTIPLIER.get(ticker, 1.0)
 
 # Calendar-day lookback for the futures watchlist candlestick charts. Actual
 # hourly bar count per symbol varies with its trading calendar -- CME futures
@@ -328,49 +384,148 @@ def rsi_series(closes, period=RSI_PERIOD):
 def bubble_radius_from_pct(pct):
     """Absolute/independent sizing: smaller |pct| (quiet) -> bigger bubble.
     Two tickers with the same |pct| always get the same radius, regardless
-    of what the rest of the board is doing this run. Kept as a per-ticker
-    fallback for compute_relative_bubble_radii() below when there isn't
-    enough of a board to normalize against."""
+    of what the rest of the board is doing this run. Kept as the per-key
+    fallback in compute_relative_bubble_radii_from_values() when there
+    isn't enough of a board to normalize against and invert=True (the
+    |% change| convention -- unused now that every bubble on this report is
+    sized by market size instead, but kept for anyone who flips a call site
+    back to it)."""
     if pct is None:
         return RSI_BUBBLE_MIN_R
     r = RSI_BUBBLE_K / (abs(pct) + RSI_BUBBLE_EPS)
     return max(RSI_BUBBLE_MIN_R, min(RSI_BUBBLE_MAX_R, r))
 
 
-def compute_relative_bubble_radii_from_pcts(abs_pct_by_key):
-    """Shared core: given {key: abs(3h % change)}, min-max normalize across
-    every key and invert it, so the single quietest key this run always gets
-    RSI_BUBBLE_MAX_R and the single most volatile always gets
-    RSI_BUBBLE_MIN_R, with everyone else spread linearly in between. This
-    guarantees the set always shows a full range of bubble sizes instead of
-    clustering at the clamps (which the fixed per-key formula could do on an
-    especially quiet or especially volatile day). Falls back to the
-    independent per-key formula when there are fewer than 2 keys to
-    normalize against."""
-    if len(abs_pct_by_key) < 2:
-        return {k: bubble_radius_from_pct(v) for k, v in abs_pct_by_key.items()}
+def compute_relative_bubble_radii_from_values(value_by_key, invert):
+    """Shared core behind every bubble-sizing scope in this report: given
+    {key: non-negative comparison value}, min-max normalize across every
+    key present and map into [RSI_BUBBLE_MIN_R, RSI_BUBBLE_MAX_R], so the
+    set always shows a full range of bubble sizes instead of clustering at
+    the clamps.
 
-    lo, hi = min(abs_pct_by_key.values()), max(abs_pct_by_key.values())
+    `invert=True` is the original |% change| convention: the SMALLEST value
+    gets the BIGGEST bubble (quietest mover gets the biggest bubble).
+    `invert=False` is the market-size convention used everywhere in this
+    report now: the LARGEST value (e.g. trailing average dollar volume)
+    gets the BIGGEST bubble -- the biggest market gets the biggest bubble.
+
+    Falls back to a fixed radius per key when there are fewer than 2 keys
+    to normalize against (the independent |% change| formula if
+    invert=True; a neutral mid-size radius if invert=False, since there's
+    no equivalent independent formula for an arbitrary size metric)."""
+    if len(value_by_key) < 2:
+        if invert:
+            return {k: bubble_radius_from_pct(v) for k, v in value_by_key.items()}
+        mid = (RSI_BUBBLE_MIN_R + RSI_BUBBLE_MAX_R) / 2.0
+        return {k: mid for k in value_by_key}
+
+    lo, hi = min(value_by_key.values()), max(value_by_key.values())
     span = hi - lo
     radii = {}
-    for key, pct in abs_pct_by_key.items():
-        frac_volatile = 0.5 if span == 0 else (pct - lo) / span  # 0=quietest, 1=most volatile
-        frac_quiet = 1.0 - frac_volatile
-        radii[key] = RSI_BUBBLE_MIN_R + frac_quiet * (RSI_BUBBLE_MAX_R - RSI_BUBBLE_MIN_R)
+    for key, val in value_by_key.items():
+        frac_high = 0.5 if span == 0 else (val - lo) / span  # 0=smallest, 1=largest
+        frac_selected = (1.0 - frac_high) if invert else frac_high
+        radii[key] = RSI_BUBBLE_MIN_R + frac_selected * (RSI_BUBBLE_MAX_R - RSI_BUBBLE_MIN_R)
     return radii
 
 
+def compute_relative_bubble_radii_from_pcts(abs_pct_by_key):
+    """Legacy |% change|-based sizing (smallest move -> biggest bubble). No
+    longer the default for the top card or futures board (see
+    compute_relative_bubble_radii_from_dollar_volume()), but still actively
+    used by the two "legacy sizing" Equilibrium panels
+    (_build_equilibrium_frames(..., sizing="legacy")) alongside their
+    market-size counterparts."""
+    return compute_relative_bubble_radii_from_values(abs_pct_by_key, invert=True)
+
+
+def avg_dollar_volume(ohlc, lookback=None, multiplier=1.0):
+    """Trailing average dollar volume (volume * close * multiplier,
+    averaged across the last `lookback` bars of `ohlc`, or the whole series
+    if `lookback` is None) -- the market-size metric used for bubble sizing
+    throughout this report. `ohlc` is oldest -> newest, each bar carrying
+    "volume" and "close" (as returned by fetch_hourly_ohlc()/
+    ohlc_list_from_hist()).
+
+    `multiplier` (see FUTURES_CONTRACT_MULTIPLIER / contract_multiplier_for())
+    is REQUIRED for a fair comparison across instruments quoted at
+    different point levels -- e.g. ZN=F (10-Year T-Note futures) trades
+    around 111 with a $1,000/point contract, while ES=F trades around 5600
+    with a $50/point contract; without the multiplier, volume*close alone
+    would make ZN=F look like a fraction of ES=F's size regardless of which
+    one actually has more money changing hands. Defaults to 1.0, correct
+    for instruments whose close is already a true per-unit dollar price
+    (e.g. BTC-USD).
+
+    Returns None if there's no usable OHLC at all, or 0.0 if every bar's
+    volume is zero/missing -- which happens for instruments that
+    structurally have no trading volume (e.g. DX-Y.NYB, the spot/cash
+    dollar index, isn't itself a traded security) rather than a data
+    outage. Callers should treat a 0.0 result as "no real volume data for
+    this instrument" and fall back accordingly -- see
+    _fill_unmeasured_size_with_section_max()."""
+    if not ohlc:
+        return None
+    window = ohlc[-lookback:] if lookback else ohlc
+    if not window:
+        return None
+    dollar_vols = [(c.get("volume") or 0.0) * c["close"] * multiplier for c in window]
+    return sum(dollar_vols) / len(dollar_vols)
+
+
+def _fill_unmeasured_size_with_section_max(size_by_key):
+    """Some instruments (e.g. DX-Y.NYB, the spot/cash dollar index) have no
+    real trading volume in the data at all -- that's a fact about the
+    instrument (it isn't itself a traded security), not evidence it's a
+    small market; the FX market DXY tracks is one of the largest in the
+    world. Rather than let a zero/missing volume collapse that
+    instrument's bubble to the smallest size in its section, treat it as
+    tied with whichever instrument in the same section has the largest
+    measured size that run."""
+    usable = {k: v for k, v in size_by_key.items() if v}
+    if not usable:
+        return dict(size_by_key)
+    max_v = max(usable.values())
+    return {k: (v if v else max_v) for k, v in size_by_key.items()}
+
+
+def compute_relative_bubble_radii_from_dollar_volume(dollar_vol_by_key):
+    """Bubble size = market size, via trailing average dollar volume (see
+    avg_dollar_volume()) -- the sizing convention used everywhere in this
+    report. Larger volume -> bigger bubble (the opposite direction from the
+    old |% change| convention). Instruments with no real volume data (0.0
+    or missing) are treated as tied with the section's largest measured
+    volume rather than penalized as smallest -- see
+    _fill_unmeasured_size_with_section_max()."""
+    filled = _fill_unmeasured_size_with_section_max(dollar_vol_by_key)
+    return compute_relative_bubble_radii_from_values(filled, invert=False)
+
+
 def compute_relative_bubble_radii(futures):
-    """Size each futures instrument's end-bubble relative to the rest of the
-    futures board this run (see compute_relative_bubble_radii_from_pcts).
-    Returns {ticker: radius}; tickers without a usable 3h reading are left
-    out (caller should default those to RSI_BUBBLE_MIN_R)."""
-    pct_by_ticker = {
-        f["ticker"]: abs(f["flow_3h"]["pct"])
+    """Size each futures instrument's end-bubble by its market size --
+    trailing average dollar volume over the fetched window -- relative to
+    the rest of the futures board this run (see
+    compute_relative_bubble_radii_from_dollar_volume()). Returns
+    {ticker: radius}; tickers without usable OHLC are left out (caller
+    should default those to RSI_BUBBLE_MIN_R)."""
+    dollar_vol_by_ticker = {
+        f["ticker"]: (avg_dollar_volume(f["ohlc"], multiplier=contract_multiplier_for(f["ticker"])) or 0.0)
         for f in futures
-        if not f.get("unavailable") and f.get("flow_3h")
+        if not f.get("unavailable") and f.get("ohlc")
     }
-    return compute_relative_bubble_radii_from_pcts(pct_by_ticker)
+    return compute_relative_bubble_radii_from_dollar_volume(dollar_vol_by_ticker)
+
+
+def format_dollar_compact(v):
+    """Compact human-readable dollar figure for captions, e.g.
+    1.42e11 -> '$142B'. Returns 'n/a' for None."""
+    if v is None:
+        return "n/a"
+    v = abs(v)
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if v >= threshold:
+            return f"${v / threshold:.1f}{suffix}"
+    return f"${v:.0f}"
 
 
 # Continuous red -> gray -> green gradient across x in [-1, 1], matching the
@@ -539,9 +694,10 @@ def build_futures(days=FUTURES_WINDOW_DAYS):
 
     Bubble radii are assigned in a second pass (see
     compute_relative_bubble_radii) so each instrument's end-bubble is sized
-    RELATIVE TO THE REST OF THE BOARD this run, not from a fixed formula --
-    this run's single quietest instrument always gets the biggest bubble and
-    the single most volatile always gets the smallest."""
+    by MARKET SIZE -- trailing average dollar volume -- RELATIVE TO THE REST
+    OF THE BOARD this run, not from a fixed formula: this run's single
+    biggest-volume instrument always gets the biggest bubble and the single
+    smallest gets the smallest."""
     out = []
     for ticker, name, category in FUTURES:
         ohlc = fetch_hourly_ohlc(ticker, hours=None, period=f"{days}d")
@@ -570,6 +726,9 @@ def build_futures(days=FUTURES_WINDOW_DAYS):
             "rsi_series": rsi_series(closes_list),
         })
 
+    for f in out:
+        if not f.get("unavailable"):
+            f["avg_dollar_volume"] = avg_dollar_volume(f["ohlc"], multiplier=contract_multiplier_for(f["ticker"]))
     bubble_radii = compute_relative_bubble_radii(out)
     for f in out:
         if not f.get("unavailable"):
@@ -701,36 +860,53 @@ def compute_window_metric(ticker, c_now, c_then, pct_ladder):
 
 
 def add_asset_rsi_and_relative_bubbles(assets):
-    """Mutates `assets` in place, adding "rsi_series", "flow_3h_hourly" and
-    "bubble_r" to each asset dict, for the hourly RSI(14) trendline + end
-    bubble shown on the top Cross-asset money flow card.
+    """Mutates `assets` in place, adding "rsi_series", "flow_3h_hourly",
+    "avg_dollar_volume" and "bubble_r" to each asset dict, for the hourly
+    RSI(14) trendline + end bubble shown on the top Cross-asset money flow
+    card.
 
-    Same convention as the futures watchlist: bubble size is the inverse of
-    |% change over the last 3 hourly candles|, but sized RELATIVE TO THE
-    OTHER CROSS-ASSET MONEY FLOW ITEMS ON THIS CARD ONLY -- a separate
-    normalization scope from the futures board's ~35-instrument one and from
-    the Equilibrium page's 6-asset one, since these are three different
-    sets of instruments.
-    """
-    bubble_pcts = {}
+    Bubble size is MARKET SIZE -- trailing average daily dollar volume
+    (preferring daily bars, which Yahoo populates far more reliably than
+    hourly futures volume; falling back to hourly bars if daily isn't
+    available) -- sized RELATIVE TO THE OTHER CROSS-ASSET MONEY FLOW ITEMS
+    ON THIS CARD ONLY: a separate normalization scope from the futures
+    board's ~35-instrument one and from the Equilibrium page's two 6-asset
+    ones, since these are different sets of instruments. DX-Y.NYB (the
+    spot dollar index) has no real trading volume at all, so it's treated
+    as tied with whichever asset here has the largest measured volume --
+    see _fill_unmeasured_size_with_section_max().
+
+    flow_3h_hourly (the |% change over the last 3 hourly candles|) is kept
+    purely as informational context in the row's caption -- it no longer
+    drives bubble size."""
+    size_by_ticker = {}
     for a in assets:
         if a.get("unavailable"):
             a["rsi_series"] = None
             a["flow_3h_hourly"] = None
+            a["avg_dollar_volume"] = None
             continue
         hourly = a.get("hourly_ohlc")
-        if not hourly or len(hourly) < RSI_PERIOD + 1:
+        if hourly and len(hourly) >= RSI_PERIOD + 1:
+            closes = [c["close"] for c in hourly]
+            a["rsi_series"] = rsi_series(closes)
+            a["flow_3h_hourly"] = compute_futures_3h_flow(closes)
+        else:
             a["rsi_series"] = None
             a["flow_3h_hourly"] = None
-            continue
-        closes = [c["close"] for c in hourly]
-        a["rsi_series"] = rsi_series(closes)
-        flow_3h_hourly = compute_futures_3h_flow(closes)
-        a["flow_3h_hourly"] = flow_3h_hourly
-        if flow_3h_hourly:
-            bubble_pcts[a["ticker"]] = abs(flow_3h_hourly["pct"])
 
-    bubble_radii = compute_relative_bubble_radii_from_pcts(bubble_pcts)
+        mult = contract_multiplier_for(a["ticker"])
+        daily = a.get("daily_ohlc")
+        if daily:
+            dollar_vol = avg_dollar_volume(daily, lookback=20, multiplier=mult)
+        elif hourly:
+            dollar_vol = avg_dollar_volume(hourly, lookback=20 * 24, multiplier=mult)
+        else:
+            dollar_vol = None
+        a["avg_dollar_volume"] = dollar_vol
+        size_by_ticker[a["ticker"]] = dollar_vol or 0.0
+
+    bubble_radii = compute_relative_bubble_radii_from_dollar_volume(size_by_ticker)
     for a in assets:
         if not a.get("unavailable"):
             a["bubble_r"] = bubble_radii.get(a["ticker"], RSI_BUBBLE_MIN_R)
@@ -1103,10 +1279,11 @@ def render_row(asset, badge=False):
     if last_rsi is not None and hourly:
         rsi_svg = render_rsi_trend_svg(rsi_vals, asset.get("bubble_r", RSI_BUBBLE_MIN_R), ohlc=hourly, width=330)
         flow_3h_hourly = asset.get("flow_3h_hourly")
-        pct3h_str = f'{flow_3h_hourly["pct"]:+.2f}%' if flow_3h_hourly else "n/a"
+        pct3h_str = f'{flow_3h_hourly["pct"]:+.2f}% 3h' if flow_3h_hourly else "3h n/a"
+        vol_str = format_dollar_compact(asset.get("avg_dollar_volume"))
         rsi_caption = (
-            f'RSI({RSI_PERIOD}) hourly · now {last_rsi:.0f} · bubble sized vs. '
-            f'other cross-asset items (bigger = quieter 3h: {pct3h_str})'
+            f'RSI({RSI_PERIOD}) hourly · now {last_rsi:.0f} · bubble sized by market size '
+            f'(avg $vol/day {vol_str}) vs. other cross-asset items · {pct3h_str}'
         )
         rsi_html = (
             f'<div class="fut-rsi-chart">{rsi_svg}</div>'
@@ -1205,10 +1382,11 @@ def render_futures_row(f):
     if last_rsi is not None:
         rsi_svg = render_rsi_trend_svg(rsi_vals, f.get("bubble_r", RSI_BUBBLE_MIN_R), ohlc=f["ohlc"], width=330)
         flow_3h = f.get("flow_3h")
-        pct3h_str = f'{flow_3h["pct"]:+.2f}%' if flow_3h else "n/a"
+        pct3h_str = f'{flow_3h["pct"]:+.2f}% 3h' if flow_3h else "3h n/a"
+        vol_str = format_dollar_compact(f.get("avg_dollar_volume"))
         rsi_caption = (
-            f'RSI({RSI_PERIOD}) hourly · now {last_rsi:.0f} · '
-            f'bubble sized vs. rest of board (bigger = quieter 3h: {pct3h_str})'
+            f'RSI({RSI_PERIOD}) hourly · now {last_rsi:.0f} · bubble sized by market size '
+            f'(avg $vol {vol_str}) vs. rest of board · {pct3h_str}'
         )
         rsi_col = (
             '<div class="fut-chart-col">'
@@ -1277,7 +1455,7 @@ def render_futures_card(futures, days=FUTURES_WINDOW_DAYS):
     <div class="card-head">
       <div>
         <h1>Futures watchlist</h1>
-        <p class="subtitle">Full board snapshot — hourly candlesticks over the last {days} days per symbol (bar count varies by trading calendar), across equity index, treasuries, metals, energy, agriculture, livestock and softs. Price chart (left) and hourly RSI(14) trend (right) sit side by side for each symbol. Each RSI line ends in a bubble sized relative to the rest of the board's last-3-hour % change — the quietest instrument this run gets the biggest bubble, the most volatile gets the smallest.</p>
+        <p class="subtitle">Full board snapshot — hourly candlesticks over the last {days} days per symbol (bar count varies by trading calendar), across equity index, treasuries, metals, energy, agriculture, livestock and softs. Price chart (left) and hourly RSI(14) trend (right) sit side by side for each symbol. Each RSI line ends in a bubble sized by market size — trailing average dollar volume, relative to the rest of the board — the biggest-volume instrument this run gets the biggest bubble.</p>
       </div>
     </div>
     {freshness_html}
@@ -1470,7 +1648,7 @@ def render_html(assets, now, futures=None):
     <div class="card-head">
       <div>
         <h1>Cross-asset money flow</h1>
-        <p class="subtitle">Where money is moving right now across equities, bonds, the dollar, gold and bitcoin — over the last 3 hours, 3 days, and 30 days. Each asset's price chart (left) sits alongside its hourly RSI(14) trend (right); the RSI line ends in a bubble sized relative to the other assets on this card — the quietest one this run gets the biggest bubble.</p>
+        <p class="subtitle">Where money is moving right now across equities, bonds, the dollar, gold and bitcoin — over the last 3 hours, 3 days, and 30 days. Each asset's price chart (left) sits alongside its hourly RSI(14) trend (right); the RSI line ends in a bubble sized by market size — trailing average dollar volume, relative to the other assets on this card — the biggest-volume asset this run gets the biggest bubble.</p>
       </div>
       <div style="display:flex; gap:8px; align-items:flex-start;">
         <a class="theme-toggle" href="#equilibrium" style="text-decoration:none; display:inline-block;">Equilibrium view &darr;</a>
@@ -1516,7 +1694,7 @@ def _eq_dom_id(ticker):
     return "".join(ch for ch in ticker if ch.isalnum()) or "x"
 
 
-def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
+def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format, sizing="volume", size_lookback=20):
     """Shared core behind build_equilibrium_history() (hourly) and
     build_equilibrium_history_daily() (daily). Given the `assets` list from
     build_report() (each carrying an `ohlc_key` list, oldest -> newest),
@@ -1527,10 +1705,21 @@ def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
     that interval, exactly like the current/latest-candle case, just
     further back.
 
-    Each frame gets its own bubble sizing, relative to the other 5 tickers
-    AT THAT SAME CANDLE (not relative to the most recent one), so scrubbing
-    the slider shows how the relative quiet/volatile ranking itself
-    evolved.
+    `sizing` picks which per-frame metric drives bubble size, relative to
+    the other 5 tickers AT THAT SAME CANDLE (not relative to the most
+    recent one) either way:
+    - "volume" (default): MARKET SIZE -- trailing average dollar volume
+      over the `size_lookback` candles ending at that candle. Scrubbing the
+      slider shows how the relative small/large ranking evolved (which
+      usually shifts slowly, unlike a 3-candle move).
+    - "legacy": the ORIGINAL |% change over the prior 3 candles| convention
+      (quietest mover gets the biggest bubble) -- kept so both conventions
+      can be shown side by side; see render_equilibrium_app().
+
+    Both "pct3" (the 3-candle % change) and "dollar_vol" (trailing average
+    dollar volume) are always computed and carried on every frame_asset
+    regardless of `sizing`, so a panel can display one as context even when
+    the other one drives its bubble size.
 
     Returns {"frames": [...]} ordered oldest -> newest (frames[-1] is the
     most recent candle), or None if any of the 6 tickers doesn't have
@@ -1543,6 +1732,7 @@ def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
         series = a.get(ohlc_key) if a else None
         if not series or len(series) < RSI_PERIOD + 1 + 3:
             return None
+        mult = contract_multiplier_for(ticker)
         closes = [c["close"] for c in series]
         rsi_vals = rsi_series(closes)
         records = []  # oldest -> newest; only candles where both RSI and a 3-candle change are defined
@@ -1551,7 +1741,11 @@ def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
                 continue
             base = closes[idx - 3]
             pct3 = ((closes[idx] - base) / base * 100) if base else None
-            records.append({"ts": series[idx].get("ts"), "rsi": rsi_vals[idx], "pct3": pct3})
+            dollar_vol = avg_dollar_volume(series[:idx + 1], lookback=size_lookback, multiplier=mult)
+            records.append({
+                "ts": series[idx].get("ts"), "rsi": rsi_vals[idx], "pct3": pct3,
+                "dollar_vol": dollar_vol,
+            })
         if len(records) < 2:
             return None
         per_ticker_records[ticker] = records
@@ -1560,14 +1754,19 @@ def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
     frames = []
     for offset in range(frame_count):
         pos_from_end = frame_count - 1 - offset  # 0 = most recent candle, larger = further back
-        frame_pcts = {}
         raw_rows = {}
         for ticker, _display_name in EQUILIBRIUM_TICKERS:
-            rec = per_ticker_records[ticker][-(pos_from_end + 1)]
-            raw_rows[ticker] = rec
-            if rec["pct3"] is not None:
-                frame_pcts[ticker] = abs(rec["pct3"])
-        radii = compute_relative_bubble_radii_from_pcts(frame_pcts)
+            raw_rows[ticker] = per_ticker_records[ticker][-(pos_from_end + 1)]
+
+        if sizing == "legacy":
+            frame_pcts = {
+                t: abs(raw_rows[t]["pct3"]) for t, _ in EQUILIBRIUM_TICKERS
+                if raw_rows[t]["pct3"] is not None
+            }
+            radii = compute_relative_bubble_radii_from_pcts(frame_pcts)
+        else:
+            frame_sizes = {t: (raw_rows[t]["dollar_vol"] or 0.0) for t, _ in EQUILIBRIUM_TICKERS}
+            radii = compute_relative_bubble_radii_from_dollar_volume(frame_sizes)
 
         frame_assets = []
         ts_candidates = []
@@ -1581,6 +1780,7 @@ def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
                 "rsi": round(rec["rsi"], 1),
                 "x": round(x, 4),
                 "pct3": None if rec["pct3"] is None else round(rec["pct3"], 3),
+                "dollar_vol": rec["dollar_vol"],
                 "bubble_r": round(radii.get(ticker, RSI_BUBBLE_MIN_R), 3),
                 "color": equilibrium_color_for_x(x),
             })
@@ -1594,21 +1794,30 @@ def _build_equilibrium_frames(assets, ohlc_key, periods, id_prefix, ts_format):
     return {"frames": frames}
 
 
-def build_equilibrium_history(assets, hours=EQUILIBRIUM_HISTORY_HOURS):
+def build_equilibrium_history(assets, hours=EQUILIBRIUM_HISTORY_HOURS, sizing="volume", id_prefix=None):
     """Hourly replay -- see _build_equilibrium_frames() for the shared
-    logic. Bubble sizing is the inverse of |% change over the prior 3
-    HOURLY candles|, relative to the other 5 tickers at that same hour."""
-    return _build_equilibrium_frames(assets, "hourly_ohlc", hours, "h-", "%Y-%m-%d %H:%M UTC")
+    logic. `sizing="volume"` (default): bubble size is market size --
+    trailing 20-hour average dollar volume ending at that hour -- relative
+    to the other 5 tickers at that same hour. `sizing="legacy"`: the
+    original |% change over the prior 3 hourly candles| convention. Both
+    are shown side by side on the Equilibrium page -- see
+    render_equilibrium_app()."""
+    if id_prefix is None:
+        id_prefix = "h-" if sizing == "volume" else "hl-"
+    return _build_equilibrium_frames(assets, "hourly_ohlc", hours, id_prefix, "%Y-%m-%d %H:%M UTC", sizing=sizing)
 
 
-def build_equilibrium_history_daily(assets, days=EQUILIBRIUM_HISTORY_DAYS):
+def build_equilibrium_history_daily(assets, days=EQUILIBRIUM_HISTORY_DAYS, sizing="volume", id_prefix=None):
     """Daily replay -- see _build_equilibrium_frames() for the shared
-    logic. Bubble sizing is the inverse of |% change over the prior 3 DAILY
-    closes|, relative to the other 5 tickers on that same day -- an
-    independent normalization scope from the hourly panel (and from every
-    other bubble-sizing scope in this report); none of these are on a
-    shared scale with each other."""
-    return _build_equilibrium_frames(assets, "daily_ohlc", days, "d-", "%Y-%m-%d")
+    logic. `sizing="volume"` (default): bubble size is market size --
+    trailing 20-day average dollar volume ending at that day -- relative to
+    the other 5 tickers on that same day. `sizing="legacy"`: the original
+    |% change over the prior 3 daily closes| convention. Every one of these
+    sizing scopes (hourly/daily x volume/legacy) is an independent
+    normalization -- none of them are on a shared scale with each other."""
+    if id_prefix is None:
+        id_prefix = "d-" if sizing == "volume" else "dl-"
+    return _build_equilibrium_frames(assets, "daily_ohlc", days, id_prefix, "%Y-%m-%d", sizing=sizing)
 
 
 def _eq_well_y(x_norm, height, base_frac=0.28, amp_frac=0.42):
@@ -1772,6 +1981,13 @@ def _equilibrium_slider_script(frames, dom_ids, *, scope, width, height, current
   function eqWellY(xn){{ const depth = 1 - xn*xn; return EQ_H*0.28 + depth*EQ_H*0.42; }}
   function eqPxOf(x){{ return EQ_CX + x*EQ_SCALE_X; }}
   function eqPyOf(x, r){{ return EQ_TOP + eqWellY(x) - 10 - r; }}
+  function eqFmtDollar(v){{
+    if (v === null || v === undefined) return 'n/a';
+    v = Math.abs(v);
+    const units = [[1e12,'T'],[1e9,'B'],[1e6,'M'],[1e3,'K']];
+    for (const [t, s] of units) {{ if (v >= t) return '$' + (v/t).toFixed(1) + s; }}
+    return '$' + v.toFixed(0);
+  }}
 
   const slider = document.getElementById('slider-{scope}');
   const scrubLabel = document.getElementById('scrubLabel-{scope}');
@@ -1804,9 +2020,10 @@ def _equilibrium_slider_script(frames, dom_ids, *, scope, width, height, current
     scrubLabel.textContent = periodsAgo === 0 ? {current_label_json} : (periodsAgo + {ago_suffix_json});
     const rows = frame.assets.slice().sort((a, b) => b.rsi - a.rsi).map(a => {{
       const pctStr = (a.pct3 === null || a.pct3 === undefined) ? 'n/a' : (a.pct3 >= 0 ? '+' : '') + a.pct3.toFixed(2) + {pct_suffix_json};
+      const volStr = eqFmtDollar(a.dollar_vol);
       return '<div class="leg-row"><span><span class="dot" style="background:' + a.color + '"></span>' + a.name +
         '</span><span><span class="rsi" style="color:' + a.color + '">' + Math.round(a.rsi) +
-        '</span><span class="pct">' + pctStr + '</span></span></div>';
+        '</span><span class="pct">' + volStr + ' · ' + pctStr + '</span></span></div>';
     }});
     legendEl.innerHTML = rows.join('');
   }}
@@ -1838,11 +2055,12 @@ def _render_equilibrium_panel(history, *, scope, section_title, section_note, cu
 
     def _eq_legend_row(a):
         pct_str = "n/a" if a["pct3"] is None else f'{a["pct3"]:+.2f}{pct_suffix}'
+        vol_str = format_dollar_compact(a["dollar_vol"])
         return (
             f'<div class="leg-row"><span><span class="dot" style="background:{a["color"]}"></span>'
             f'{html.escape(a["name"])}</span>'
             f'<span><span class="rsi" style="color:{a["color"]}">{a["rsi"]:.0f}</span>'
-            f'<span class="pct">{pct_str}</span></span></div>'
+            f'<span class="pct">{vol_str} · {pct_str}</span></span></div>'
         )
 
     legend_html = "".join(
@@ -1882,18 +2100,18 @@ def _render_equilibrium_panel(history, *, scope, section_title, section_note, cu
 
 def render_equilibrium_app(assets, now, embedded=False):
     """Build the `<div id="app">...</div>` markup for the Equilibrium -- RSI
-    Reversion view: TWO real-data scrubbable panels stacked in the same
-    app -- an hourly one (slider from EQUILIBRIUM_HISTORY_HOURS hours ago to
-    the current hour) and a daily one below it (slider from
-    EQUILIBRIUM_HISTORY_DAYS trading days ago to today) -- each plotting the
-    same 6 core assets at that candle's real RSI, end bubble sized relative
-    to the other 5 AT THAT SAME CANDLE. No simulated/invented motion
-    anywhere -- every slider position on either panel shows an actual past
-    reading; client-side JS only looks up the frame for the slider's
-    position and moves elements to match (a CSS transition makes that read
-    as motion, not a jump cut). The two panels' bubble sizing is computed
-    independently (hourly 3-candle vs. daily 3-candle), so they are never on
-    a shared scale with each other.
+    Reversion view: FOUR real-data scrubbable panels stacked in the same
+    app, covering both time intervals and both bubble-sizing conventions --
+    Hourly (legacy |% change|), Daily (legacy |% change|), Hourly (market
+    size), Daily (market size) -- each plotting the same 6 core assets at
+    that candle's real RSI. No simulated/invented motion anywhere -- every
+    slider position on every panel shows an actual past reading;
+    client-side JS only looks up the frame for the slider's position and
+    moves elements to match (a CSS transition makes that read as motion,
+    not a jump cut). All four panels' bubble sizing is computed
+    independently of the other three, so none of them are on a shared
+    scale with each other -- see _build_equilibrium_frames()'s `sizing`
+    parameter.
 
     `embedded=True` drops the "back to report" link (pointless when this is
     already part of the same page) and gives the app a fixed height that
@@ -1906,7 +2124,69 @@ def render_equilibrium_app(assets, now, embedded=False):
     min_height = "560px" if embedded else "100vh"
     nav_html = "" if embedded else '<a class="back-link" href="index.html">&larr; Back to report</a>'
 
-    hourly_history = build_equilibrium_history(assets)
+    def _unavailable_msg(interval_word):
+        return (
+            f"Live {interval_word} RSI history wasn't fully available for all 6 assets this run ({as_of}). "
+            f"This panel will populate once every asset has enough {interval_word} bars."
+        )
+
+    # -- Legacy panels: the ORIGINAL |% change over the prior 3 candles|
+    # convention (quietest mover gets the biggest bubble). Kept alongside
+    # the newer market-size panels below so both conventions can be
+    # compared side by side, rather than replaced outright.
+    hourly_legacy_history = build_equilibrium_history(assets, sizing="legacy")
+    hourly_legacy_back = (
+        (len(hourly_legacy_history["frames"]) - 1) if hourly_legacy_history else EQUILIBRIUM_HISTORY_HOURS
+    )
+    hourly_legacy_note = (
+        "Six assets — <b>DXY, Bonds, SPY, NASDAQ, GOLD, WTI Crude</b> — plotted "
+        f"by real hourly <b>RSI(14)</b>. Drag the slider to replay the last "
+        f"{hourly_legacy_back} hours, hour by hour — every position is an actual "
+        "past reading pulled from real hourly closes, not invented or "
+        "simulated motion. RSI 50 is equilibrium; the well steepens toward 0 "
+        "and 100. <b>Green</b> = overbought side. <b>Red</b> = oversold side."
+        "<br><br>"
+        "<b>Legacy sizing:</b> each bubble's size is the inverse of that "
+        "asset's |% change over the prior 3 hourly candles|, relative to "
+        "the other five at that same hour — the quietest of the six that "
+        "hour gets the biggest bubble, the most volatile gets the "
+        "smallest. See the Hourly (market size) panel below for the "
+        "current default convention."
+    )
+    hourly_legacy_panel = _render_equilibrium_panel(
+        hourly_legacy_history, scope="hl", section_title="Hourly — legacy sizing (|% change|)",
+        section_note=hourly_legacy_note, current_label="Current hour", ago_suffix="h ago",
+        pct_suffix="% 3h", lookback_word="hour", unavailable_msg=_unavailable_msg("hourly"),
+    )
+
+    daily_legacy_history = build_equilibrium_history_daily(assets, sizing="legacy")
+    daily_legacy_back = (
+        (len(daily_legacy_history["frames"]) - 1) if daily_legacy_history else EQUILIBRIUM_HISTORY_DAYS
+    )
+    daily_legacy_note = (
+        "Same six assets, same <b>RSI(14)</b> math, but on <b>daily</b> "
+        f"closes instead of hourly ones. Drag the slider to replay the last "
+        f"{daily_legacy_back} trading days, day by day — every position is an "
+        "actual past reading pulled from real daily closes, never invented "
+        "or simulated."
+        "<br><br>"
+        "<b>Legacy sizing:</b> each bubble's size is the inverse of that "
+        "asset's |% change over the prior 3 daily closes|, relative to the "
+        "other five on that same day — the quietest of the six that day "
+        "gets the biggest bubble, the most volatile gets the smallest. See "
+        "the Daily (market size) panel below for the current default "
+        "convention."
+    )
+    daily_legacy_panel = _render_equilibrium_panel(
+        daily_legacy_history, scope="dl", section_title="Daily — legacy sizing (|% change|)",
+        section_note=daily_legacy_note, current_label="Today", ago_suffix="d ago",
+        pct_suffix="% 3d", lookback_word="day", unavailable_msg=_unavailable_msg("daily"),
+    )
+
+    # -- Market-size panels: the current default convention used everywhere
+    # else in this report (top card, futures board) -- trailing average
+    # dollar volume, corrected for each instrument's contract multiplier.
+    hourly_history = build_equilibrium_history(assets, sizing="volume")
     hourly_back = (len(hourly_history["frames"]) - 1) if hourly_history else EQUILIBRIUM_HISTORY_HOURS
     hourly_note = (
         "Six assets — <b>DXY, Bonds, SPY, NASDAQ, GOLD, WTI Crude</b> — plotted "
@@ -1916,21 +2196,20 @@ def render_equilibrium_app(assets, now, embedded=False):
         "simulated motion. RSI 50 is equilibrium; the well steepens toward 0 "
         "and 100. <b>Green</b> = overbought side. <b>Red</b> = oversold side."
         "<br><br>"
-        "Each bubble's size is the inverse of that asset's |% change over the "
-        "prior 3 hourly candles|, <b>relative to the other five at that same "
-        "hour</b> — the quietest of the six that hour gets the biggest "
-        "bubble, the most volatile gets the smallest."
+        "Each bubble's size is that asset's <b>market size</b> — trailing "
+        "average dollar volume over the last 20 hourly candles, <b>relative "
+        "to the other five at that same hour</b> — the biggest market that "
+        "hour gets the biggest bubble. DXY has no real trading volume of "
+        "its own (it's a spot index, not a traded security), so it's tied "
+        "with whichever asset here has the largest measured volume."
     )
     hourly_panel = _render_equilibrium_panel(
-        hourly_history, scope="h", section_title="Hourly", section_note=hourly_note,
+        hourly_history, scope="hn", section_title="Hourly — market size ($ volume)", section_note=hourly_note,
         current_label="Current hour", ago_suffix="h ago", pct_suffix="% 3h", lookback_word="hour",
-        unavailable_msg=(
-            f"Live hourly RSI history wasn't fully available for all 6 assets this run ({as_of}). "
-            "This panel will populate on the next hourly run once every asset has enough hourly bars."
-        ),
+        unavailable_msg=_unavailable_msg("hourly"),
     )
 
-    daily_history = build_equilibrium_history_daily(assets)
+    daily_history = build_equilibrium_history_daily(assets, sizing="volume")
     daily_back = (len(daily_history["frames"]) - 1) if daily_history else EQUILIBRIUM_HISTORY_DAYS
     daily_note = (
         "Same six assets, same <b>RSI(14)</b> math, but on <b>daily</b> "
@@ -1939,19 +2218,18 @@ def render_equilibrium_app(assets, now, embedded=False):
         "actual past reading pulled from real daily closes, never invented "
         "or simulated."
         "<br><br>"
-        "Each bubble's size is the inverse of that asset's |% change over "
-        "the prior 3 daily closes|, <b>relative to the other five on that "
-        "same day</b> — a separate normalization from the hourly panel "
-        "above (and from every other bubble-sizing scope in this report); "
-        "none of these are on a shared scale with each other."
+        "Each bubble's size is that asset's <b>market size</b> — trailing "
+        "average dollar volume over the last 20 trading days, <b>relative "
+        "to the other five on that same day</b> — a separate normalization "
+        "from every other panel/section in this report; none of these are "
+        "on a shared scale with each other. DXY has no real trading volume "
+        "of its own, so it's tied with whichever asset here has the "
+        "largest measured volume."
     )
     daily_panel = _render_equilibrium_panel(
-        daily_history, scope="d", section_title="Daily", section_note=daily_note,
+        daily_history, scope="dn", section_title="Daily — market size ($ volume)", section_note=daily_note,
         current_label="Today", ago_suffix="d ago", pct_suffix="% 3d", lookback_word="day",
-        unavailable_msg=(
-            f"Live daily RSI history wasn't fully available for all 6 assets this run ({as_of}). "
-            "This panel will populate once every asset has enough daily bars."
-        ),
+        unavailable_msg=_unavailable_msg("daily"),
     )
 
     return f"""<div id="app" style="min-height:{min_height};">
@@ -1965,7 +2243,9 @@ def render_equilibrium_app(assets, now, embedded=False):
       {nav_html}
     </div>
   </header>
-  <main>{hourly_panel}
+  <main>{hourly_legacy_panel}
+    <div class="eq-divider"></div>{daily_legacy_panel}
+    <div class="eq-divider"></div>{hourly_panel}
     <div class="eq-divider"></div>{daily_panel}
   </main>
 </div>"""
