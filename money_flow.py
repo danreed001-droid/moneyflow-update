@@ -1883,6 +1883,12 @@ def _build_quadrant_frames(assets, ohlc_key, periods, id_prefix, ts_format, size
             idx_in_recs = len(recs) - 1 - pos_from_end
             trail_start = max(0, idx_in_recs - (trail_len - 1))
             trail_slice = recs[trail_start:idx_in_recs + 1]  # oldest -> newest, ends at current
+            if len(trail_slice) >= 2:
+                # Only draw the endpoints -- one straight line from the
+                # oldest point in the window (e.g. 2 candles back, when
+                # trail_len=3) directly to the current point, skipping the
+                # intermediate candle(s) rather than a multi-segment path.
+                trail_slice = [trail_slice[0], trail_slice[-1]]
             trail = [
                 {"rsi": round(r["rsi"], 2), "pct1": None if r["pct1"] is None else round(r["pct1"], 3)}
                 for r in trail_slice
