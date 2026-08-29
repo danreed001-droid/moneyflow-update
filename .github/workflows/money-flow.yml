@@ -4,7 +4,10 @@ on:
   schedule:
     # Every hour, every day (BTC-USD and the futures book trade nearly around
     # the clock, so this isn't restricted to US weekday market hours).
-    - cron: '0 * * * *'
+    # Runs at :22 past the hour rather than :00 -- GitHub's shared runners
+    # get a pile-up of everyone's cron jobs right at the top of the hour,
+    # which can delay a :00 run; an off-the-hour minute avoids that queue.
+    - cron: '22 * * * *'
   workflow_dispatch: {}
 
 permissions:
