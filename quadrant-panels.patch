@@ -1,8 +1,8 @@
 diff --git a/money_flow.py b/money_flow.py
-index 7169497..8c8b5d6 100644
+index 7169497..327f020 100644
 --- a/money_flow.py
 +++ b/money_flow.py
-@@ -1820,6 +1820,115 @@ def build_equilibrium_history_daily(assets, days=EQUILIBRIUM_HISTORY_DAYS, sizin
+@@ -1820,6 +1820,121 @@ def build_equilibrium_history_daily(assets, days=EQUILIBRIUM_HISTORY_DAYS, sizin
      return _build_equilibrium_frames(assets, "daily_ohlc", days, id_prefix, "%Y-%m-%d", sizing=sizing)
  
  
@@ -69,6 +69,12 @@ index 7169497..8c8b5d6 100644
 +            idx_in_recs = len(recs) - 1 - pos_from_end
 +            trail_start = max(0, idx_in_recs - (trail_len - 1))
 +            trail_slice = recs[trail_start:idx_in_recs + 1]  # oldest -> newest, ends at current
++            if len(trail_slice) >= 2:
++                # Only draw the endpoints -- one straight line from the
++                # oldest point in the window (e.g. 2 candles back, when
++                # trail_len=3) directly to the current point, skipping the
++                # intermediate candle(s) rather than a multi-segment path.
++                trail_slice = [trail_slice[0], trail_slice[-1]]
 +            trail = [
 +                {"rsi": round(r["rsi"], 2), "pct1": None if r["pct1"] is None else round(r["pct1"], 3)}
 +                for r in trail_slice
@@ -118,7 +124,7 @@ index 7169497..8c8b5d6 100644
  def _eq_well_y(x_norm, height, base_frac=0.28, amp_frac=0.42):
      """Same potential-well shape used both server-side (initial paint) and
      client-side (JS port in EQUILIBRIUM_SLIDER_SCRIPT): lowest (largest y
-@@ -1895,6 +2004,77 @@ def render_equilibrium_svg(frame_assets, width=EQUILIBRIUM_SVG_WIDTH, height=EQU
+@@ -1895,6 +2010,77 @@ def render_equilibrium_svg(frame_assets, width=EQUILIBRIUM_SVG_WIDTH, height=EQU
      )
  
  
@@ -196,7 +202,7 @@ index 7169497..8c8b5d6 100644
  EQUILIBRIUM_CSS = """
    #app{
      --bg:#0B0E14; --well:#3A4A5C; --neutral:#9CA3AF; --cyan:#4FD8E8;
-@@ -1924,6 +2104,7 @@ EQUILIBRIUM_CSS = """
+@@ -1924,6 +2110,7 @@ EQUILIBRIUM_CSS = """
    #app .stage-wrap svg .eq-bubble{ transition: cx 0.35s ease, cy 0.35s ease, r 0.35s ease, fill 0.35s ease, stroke 0.35s ease; }
    #app .stage-wrap svg .eq-label,
    #app .stage-wrap svg .eq-rsi{ transition: x 0.35s ease, y 0.35s ease, fill 0.35s ease; }
@@ -204,7 +210,7 @@ index 7169497..8c8b5d6 100644
    #app .hud{ display:flex; justify-content:space-between; padding:0 8px;
      font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dim); }
    #app .side-label{display:flex; flex-direction:column; gap:2px;}
-@@ -2098,6 +2279,162 @@ def _render_equilibrium_panel(history, *, scope, section_title, section_note, cu
+@@ -2098,6 +2285,162 @@ def _render_equilibrium_panel(history, *, scope, section_title, section_note, cu
  <script>{script}</script>"""
  
  
@@ -367,7 +373,7 @@ index 7169497..8c8b5d6 100644
  def render_equilibrium_app(assets, now, embedded=False):
      """Build the `<div id="app">...</div>` markup for the Equilibrium -- RSI
      Reversion view: FOUR real-data scrubbable panels stacked in the same
-@@ -2232,6 +2569,55 @@ def render_equilibrium_app(assets, now, embedded=False):
+@@ -2232,6 +2575,55 @@ def render_equilibrium_app(assets, now, embedded=False):
          unavailable_msg=_unavailable_msg("daily"),
      )
  
@@ -423,7 +429,7 @@ index 7169497..8c8b5d6 100644
      return f"""<div id="app" style="min-height:{min_height};">
    <header>
      <div>
-@@ -2247,6 +2633,8 @@ def render_equilibrium_app(assets, now, embedded=False):
+@@ -2247,6 +2639,8 @@ def render_equilibrium_app(assets, now, embedded=False):
      <div class="eq-divider"></div>{daily_legacy_panel}
      <div class="eq-divider"></div>{hourly_panel}
      <div class="eq-divider"></div>{daily_panel}
@@ -431,4 +437,3 @@ index 7169497..8c8b5d6 100644
 +    <div class="eq-divider"></div>{quadrant_daily_panel}
    </main>
  </div>"""
- 
