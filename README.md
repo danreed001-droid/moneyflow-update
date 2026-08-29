@@ -16,10 +16,13 @@ This is an updated fork of the original `moneyflow` repo. What's new here:
   single quietest instrument always gets the biggest bubble and the single
   most volatile always gets the smallest — the board always shows a full
   range of bubble sizes instead of clustering at one end.
-- **`equilibrium.html`** — the "Equilibrium — RSI Reversion" view: DXY, the
-  10Y note (BONDS), ES=F (SPY), NQ=F (NASDAQ), gold, and WTI crude, each
-  plotted along an RSI potential well — the same tickers the main snapshot
-  already pulls. It's linked from the top of the main report.
+- **Equilibrium — RSI Reversion**, embedded directly at the bottom of
+  `index.html` (the "Equilibrium view ↓" link at the top jumps straight to
+  it — no separate page to open): DXY, the 10Y note (BONDS), ES=F (SPY),
+  NQ=F (NASDAQ), gold, and WTI crude, each plotted along an RSI potential
+  well — the same tickers the main snapshot already pulls. The same content
+  is also still generated as its own standalone `equilibrium.html`, if you
+  want a page to link to directly instead of scrolling.
 
   A slider lets you scrub from 20 hours ago up to the current hour. There is
   **no simulation anywhere** — every slider position replays an actual past
