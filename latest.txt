@@ -1,16 +1,16 @@
 Cross-asset money flow snapshot
-S&P 500 futures (ES=F): 7,701.50 (-56.25, -0.73%) -- money flowing out of equities -- Medium [3d: +0.33%, Mild, up] [30d: +3.40%, Medium, up]
-Nasdaq 100 futures (NQ=F): 29,535.25 (-36.25, -0.12%) -- little change / roughly flat [3d: +1.20%, Medium, up] [30d: +4.77%, Medium, up]
-10-Year T-Note futures (ZN=F): 107.36 (-0.25, -0.23%) -- money flowing out of Treasury notes -- Mild [3d: -0.29%, Mild, down] [30d: -1.12%, Mild, down]
+S&P 500 futures (ES=F): 7,710.25 (-47.50, -0.61%) -- money flowing out of equities -- Medium [3d: +0.44%, Mild, up] [30d: +3.52%, Medium, up]
+Nasdaq 100 futures (NQ=F): 29,621.50 (+50.00, +0.17%) -- money flowing into tech/Nasdaq equities -- Mild [3d: +1.49%, Medium, up] [30d: +5.08%, Medium, up]
+10-Year T-Note futures (ZN=F): 107.45 (-0.16, -0.15%) -- money flowing out of Treasury notes -- Mild [3d: -0.20%, Mild, down] [30d: -1.04%, Mild, down]
 US Dollar Index (DXY): 99.18 (+0.02, +0.02%) -- little change / roughly flat [3h: +0.05%, Mild, up] [3d: -0.39%, Mild, down] [30d: -2.30%, Medium, down]
-Gold futures (GC=F): 4,456.40 (-57.40, -1.27%) -- money flowing out of gold -- Medium [3d: +2.06%, Medium, up] [30d: +9.37%, Heavy, up]
-WTI Crude Oil futures (CL=F): 92.67 (+0.65, +0.71%) -- money flowing into crude oil -- Mild [3d: +1.82%, Medium, up] [30d: +12.18%, Heavy, up]
-Bitcoin (BTC-USD): 79,004.13 (-1,335.00, -1.66%) -- money flowing out of BTC -- Medium [3h: -0.21%, Flat, flat] [3d: -0.84%, Flat, flat] [30d: +21.72%, Heavy, up]
+Gold futures (GC=F): 4,467.70 (-46.10, -1.02%) -- money flowing out of gold -- Medium [3d: +2.32%, Medium, up] [30d: +9.65%, Heavy, up]
+WTI Crude Oil futures (CL=F): 92.14 (+0.12, +0.13%) -- little change / roughly flat [3d: +1.24%, Mild, up] [30d: +11.54%, Medium, up]
+Bitcoin (BTC-USD): 79,246.38 (+10.67, +0.01%) -- little change / roughly flat [3d: -0.53%, Flat, flat] [30d: +22.10%, Heavy, up]
 
-In: crude oil (mild).
-Out: equities (medium), Treasury notes (mild), gold (medium), BTC (medium).
-Flat: tech/Nasdaq equities (flat), the dollar (flat).
-As of: 2026-09-07 23:27 UTC (yfinance/Yahoo real-time feed).
+In: tech/Nasdaq equities (mild).
+Out: equities (medium), Treasury notes (mild), gold (medium).
+Flat: the dollar (flat), crude oil (flat), BTC (flat).
+As of: 2026-09-08 00:41 UTC (yfinance/Yahoo real-time feed).
 Automated informational snapshot, not financial advice.
 
 Futures watchlist (hourly OHLC, last 30 days -- bar count varies by symbol's trading calendar):
