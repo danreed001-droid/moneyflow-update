@@ -1029,6 +1029,9 @@ def build_report():
 WEEKLY_RANK_WEEKS = 26           # ~6 months of weeks shown in the weekly grid
 WEEKLY_RANK_BASELINE_WEEKS = 52  # trailing weeks that define each asset's normal weekly move (sigma shading)
 DAILY_RANK_DAYS = 30             # trading days shown in the daily grid
+# Assets in the ranking grid, in column order (left -> right). Bitcoin is left
+# out on purpose; it stays on the cross-asset cards above.
+RANK_GRID_TICKERS = ["NQ=F", "ES=F", "DX-Y.NYB", "CL=F", "GC=F", "ZN=F"]
 DAILY_RANK_BASELINE_DAYS = 60    # trailing days that define each asset's normal daily move (sigma shading)
 WEEKLY_RANK_MIN_BASELINE = 20    # need at least this many prior periods for a sigma
 WEEKLY_RANK_SIGMA_CAP = 2.5      # moves this many normal moves or more get the darkest sigma shade
@@ -1062,8 +1065,8 @@ def weekly_from_daily(daily):
 
 def _build_rank_grid(available, closes_by_ticker, periods, partial_after, baseline):
     """Ranks the assets each period by % change from the previous period
-    (1 = best gain) and orders the columns by the sum of those ranks
-    (lowest = best, on the left). `periods` is the list of period keys to
+    (1 = best gain), with the sum of those ranks over the window (lowest =
+    best). Columns keep the order of `available` (RANK_GRID_TICKERS). `periods` is the list of period keys to
     show, preceded by the start period: periods[0] is only the base the
     first shown change is measured from."""
     if len(periods) < 2:
@@ -1114,9 +1117,8 @@ def _build_rank_grid(available, closes_by_ticker, periods, partial_after, baseli
         t: sum(r["cells"][t]["rank"] if t in r["cells"] else len(closes_by_ticker) for r in rows)
         for t in closes_by_ticker
     }
-    ordered = sorted(available, key=lambda a: (rank_sum[a["ticker"]], -(growth[a["ticker"]] or 0)))
     return {
-        "assets": [(a["ticker"], a["short_name"]) for a in ordered],
+        "assets": [(a["ticker"], a["short_name"]) for a in available],
         "rows": rows,
         "growth": growth,
         "rank_sum": rank_sum,
@@ -1125,13 +1127,14 @@ def _build_rank_grid(available, closes_by_ticker, periods, partial_after, baseli
 
 
 def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS, days=DAILY_RANK_DAYS):
-    """{"weekly": grid, "daily": grid} for the cross-asset card's items (see
+    """{"weekly": grid, "daily": grid} for RANK_GRID_TICKERS (see
     _build_rank_grid), from one daily-bar fetch per asset. Weekly = Friday
     close to Friday close over the last `weeks` weeks; daily = session to
     session over the last `days` trading days, using only days every asset
     traded so a holiday can't leave one asset ranked alone. Returns None if
     no data came back."""
-    available = [a for a in assets if not a.get("unavailable")]
+    by_ticker = {a["ticker"]: a for a in assets if not a.get("unavailable")}
+    available = [by_ticker[t] for t in RANK_GRID_TICKERS if t in by_ticker]
     daily = {a["ticker"]: fetch_daily_closes(a["ticker"]) for a in available}
     daily = {t: c for t, c in daily.items() if c}
     if not daily:
@@ -1223,7 +1226,7 @@ def _render_rank_table(grid, view):
     n = len(grid["rows"])
     period_desc = "Friday close to Friday close" if weekly else "close to close, trading days every asset traded"
     return f'''      <div class="wr-view" data-view="{view}">
-      <p class="wr-sub">Each {unit} ({period_desc}), the assets above are ranked by their % change: <strong>1</strong> = best gain that {unit}. Columns are sorted left to right by the <strong>sum of {adj} ranks</strong> over the last {n} {units} (since {grid["start"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down. Hover a cell for details.</p>
+      <p class="wr-sub">Each {unit} ({period_desc}), the assets are ranked by their % change: <strong>1</strong> = best gain that {unit}. The <strong>sum of {adj} ranks</strong> over the last {n} {units} (since {grid["start"]:%b %-d, %Y}) is at the bottom — lowest sum = best. Blue = up, red = down. Hover a cell for details.</p>
       <div class="wr-scroll">
         <table class="wr-table">
           <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>

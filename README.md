@@ -44,10 +44,11 @@ This is an updated fork of the original `moneyflow` repo. What's new here:
 - **Growth ranking grid**, just under the Cross-asset money flow charts,
   with a **Weekly / Daily** toggle: the last 26 weeks (Friday close to
   Friday close) or the last 30 trading days (close to close, only days
-  every asset traded) for every asset on that card, ranked each period by
-  % change (1 = best gain). Columns are sorted left to right by the sum of
-  those ranks over the window (lowest = best, on the left); the footer
-  shows each sum and the asset's total growth over the window. Cells are
+  every asset traded) for Nasdaq, S&P 500, Dollar, Crude, Gold and the
+  10-Year, in that fixed column order (`RANK_GRID_TICKERS`; Bitcoin is left
+  out), ranked each period by % change (1 = best gain). The footer shows
+  the sum of each asset's ranks over the window (lowest = best) and its
+  total growth. Cells are
   blue (up) / red (down), with a second toggle for shading: **Own range**
   (each asset's largest move in the window is darkest) or **vs. normal
   move** (how far the move is off the asset's normal move -- std dev of its
