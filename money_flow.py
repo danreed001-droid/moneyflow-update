@@ -1022,15 +1022,13 @@ def build_report():
 
 
 # --------------------------------------------------------------------------
-# Weekly move ranking -- which cross-asset item moved most vs. its usual week
+# Weekly growth ranking -- which cross-asset item gained the most each week
 # --------------------------------------------------------------------------
 
-WEEKLY_RANK_WEEKS = 26           # ~6 months of weeks shown in the grid
-WEEKLY_RANK_BASELINE_WEEKS = 52  # trailing weeks that define each asset's "usual" weekly move
-WEEKLY_RANK_MIN_BASELINE = 20    # need at least this many prior weeks to score a week
+WEEKLY_RANK_WEEKS = 26  # ~6 months of weeks shown in the grid
 
 
-def fetch_weekly_closes(ticker, period="2y"):
+def fetch_weekly_closes(ticker, period="1y"):
     """[(week_ending_friday, close), ...] oldest -> newest, from daily bars.
     Weekend bars (BTC-USD trades 7 days) are dropped so every asset's week
     ends on the same Friday close and the weeks line up across the grid."""
@@ -1050,62 +1048,66 @@ def fetch_weekly_closes(ticker, period="2y"):
     return sorted(by_week.items())
 
 
-def weekly_move_scores(weekly_closes, baseline_weeks=WEEKLY_RANK_BASELINE_WEEKS,
-                       min_baseline=WEEKLY_RANK_MIN_BASELINE):
-    """{week_ending: {"pct", "sigma", "z"}} -- each week's % change scored
-    against the standard deviation of the asset's PRIOR `baseline_weeks`
-    weekly % changes (its usual weekly move). z = pct / sigma, so a 2.0
-    means the asset moved twice its normal weekly amount."""
-    changes = []
-    for (_, prev), (week, close) in zip(weekly_closes, weekly_closes[1:]):
-        if prev:
-            changes.append((week, (close - prev) / prev * 100))
-    scores = {}
-    for i, (week, pct) in enumerate(changes):
-        prior = [c for _, c in changes[max(0, i - baseline_weeks):i]]
-        if len(prior) < min_baseline:
-            continue
-        mean = sum(prior) / len(prior)
-        sigma = (sum((c - mean) ** 2 for c in prior) / (len(prior) - 1)) ** 0.5
-        if sigma > 0:
-            scores[week] = {"pct": pct, "sigma": sigma, "z": pct / sigma}
-    return scores
-
-
 def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
-    """Ranks the cross-asset card's items each week by |z| (1 = biggest move
-    relative to its usual weekly move). Returns None if nothing scored."""
+    """Ranks the cross-asset card's items each week by % change (1 = best
+    gain), and orders the columns by the sum of those weekly ranks over the
+    window (lowest = best, on the left). Returns None if no weekly data came back."""
     available = [a for a in assets if not a.get("unavailable")]
-    scores_by_ticker = {a["ticker"]: weekly_move_scores(fetch_weekly_closes(a["ticker"])) for a in available}
-    all_weeks = sorted({w for sc in scores_by_ticker.values() for w in sc}, reverse=True)[:weeks]
-    if not all_weeks:
+    closes_by_ticker = {a["ticker"]: dict(fetch_weekly_closes(a["ticker"])) for a in available}
+    all_weeks = sorted({w for c in closes_by_ticker.values() for w in c})
+    shown = all_weeks[-weeks:]
+    if len(all_weeks) < 2 or not shown:
         return None
+    start_week = all_weeks[-weeks - 1] if len(all_weeks) > weeks else all_weeks[0]
+    if start_week == shown[0]:
+        shown = shown[1:]
+
+    def pct(ticker, prev_week, week):
+        c = closes_by_ticker[ticker]
+        if prev_week in c and week in c and c[prev_week]:
+            return (c[week] - c[prev_week]) / c[prev_week] * 100
+        return None
+
     rows = []
-    for week in all_weeks:
-        cells = {t: dict(sc[week]) for t, sc in scores_by_ticker.items() if week in sc}
-        for rank, t in enumerate(sorted(cells, key=lambda t: -abs(cells[t]["z"])), start=1):
+    prev = start_week
+    for week in shown:
+        cells = {}
+        for t in closes_by_ticker:
+            p = pct(t, prev, week)
+            if p is not None:
+                cells[t] = {"pct": p}
+        for rank, t in enumerate(sorted(cells, key=lambda t: -cells[t]["pct"]), start=1):
             cells[t]["rank"] = rank
         rows.append({"week": week, "partial": week > now.date(), "n": len(cells), "cells": cells})
+        prev = week
+    rows.reverse()  # newest first
 
-    # Columns left -> right by average rank over the window (lowest = most
-    # unusual mover); assets with no scored weeks go last.
-    def avg_rank(ticker):
-        ranks = [r["cells"][ticker]["rank"] for r in rows if ticker in r["cells"]]
-        return sum(ranks) / len(ranks) if ranks else float("inf")
-
-    ordered = sorted(available, key=lambda a: avg_rank(a["ticker"]))
-    return {"assets": [(a["ticker"], a["short_name"]) for a in ordered], "rows": rows}
-
+    growth = {t: pct(t, start_week, shown[-1]) for t in closes_by_ticker}
+    # Sum of weekly ranks, lowest = best; a week an asset has no data for
+    # counts as last place so a gap can't make it look better.
+    rank_sum = {
+        t: sum(r["cells"][t]["rank"] if t in r["cells"] else len(closes_by_ticker) for r in rows)
+        for t in closes_by_ticker
+    }
+    ordered = sorted(available, key=lambda a: (rank_sum[a["ticker"]], -(growth[a["ticker"]] or 0)))
+    return {
+        "assets": [(a["ticker"], a["short_name"]) for a in ordered],
+        "rows": rows,
+        "growth": growth,
+        "rank_sum": rank_sum,
+        "start_week": start_week,
+    }
 
 # --------------------------------------------------------------------------
 # HTML rendering
 # --------------------------------------------------------------------------
 
-def _weekly_rank_cell_style(rank, n, direction):
-    """Background shade: hue = direction (blue up / red down, the page's
-    in/out colors), strength = rank (rank 1 darkest)."""
-    strength = 85 - (rank - 1) * (70 / max(n - 1, 1))
-    var = "--div-in" if direction >= 0 else "--div-out"
+def _weekly_rank_cell_style(pct, row_max_abs):
+    """Hue = direction (blue up / red down, the page's in/out colors);
+    strength = size of the move vs. the biggest move in that week's row, so
+    the best gainer is the darkest blue and the worst loser the darkest red."""
+    strength = 15 + 70 * (abs(pct) / row_max_abs if row_max_abs else 0)
+    var = "--div-in" if pct >= 0 else "--div-out"
     text = "#ffffff" if strength > 55 else "var(--text-primary)"
     return f"background: color-mix(in srgb, var({var}) {strength:.0f}%, var(--surface-1)); color: {text};"
 
@@ -1120,34 +1122,34 @@ def render_weekly_rank_grid(weekly):
         for t, name in assets
     )
     body = []
-    rank_totals = {t: [] for t, _ in assets}
     for row in weekly["rows"]:
         label = row["week"].strftime("%b %-d, %Y")
         if row["partial"]:
             label += " <em>(to date)</em>"
+        row_max_abs = max((abs(c["pct"]) for c in row["cells"].values()), default=0)
         tds = []
         for t, name in assets:
             c = row["cells"].get(t)
             if not c:
                 tds.append('<td class="wr-na">–</td>')
                 continue
-            rank_totals[t].append(c["rank"])
-            tip = (f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}% vs. usual '
-                   f'±{c["sigma"]:.2f}% ({abs(c["z"]):.1f}× normal) — rank {c["rank"]} of {row["n"]}')
+            tip = f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}% — rank {c["rank"]} of {row["n"]}'
             tds.append(
-                f'<td style="{_weekly_rank_cell_style(c["rank"], row["n"], c["pct"])}" title="{esc(tip)}">'
+                f'<td style="{_weekly_rank_cell_style(c["pct"], row_max_abs)}" title="{esc(tip)}">'
                 f'<span class="wr-rank">{c["rank"]}</span>'
-                f'<span class="wr-detail">{c["pct"]:+.1f}% · {abs(c["z"]):.1f}σ</span></td>'
+                f'<span class="wr-detail">{c["pct"]:+.1f}%</span></td>'
             )
         body.append(f'<tr><th class="wr-week">{label}</th>{"".join(tds)}</tr>')
-    avg = "".join(
-        f'<td>{sum(r) / len(r):.1f}</td>' if r else '<td class="wr-na">–</td>'
-        for r in rank_totals.values()
+    growth_cells = "".join(
+        f'<td class="{"wr-up" if g >= 0 else "wr-down"}">{g:+.1f}%</td>' if g is not None else '<td class="wr-na">–</td>'
+        for g in (weekly["growth"].get(t) for t, _ in assets)
     )
+    sums = "".join(f'<td>{weekly["rank_sum"][t]}</td>' for t, _ in assets)
+    n_weeks = len(weekly["rows"])
     return f'''
     <div class="weekly-rank">
-      <h2>Weekly move ranking — last {len(weekly["rows"])} weeks</h2>
-      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by how big their move was <em>relative to their own usual weekly move</em> — the % change divided by the standard deviation of that asset's prior {WEEKLY_RANK_BASELINE_WEEKS} weekly changes (σ). <strong>1</strong> = the most unusual move that week. Columns are sorted left to right by average rank over these weeks. Blue = up, red = down; darker = higher rank. Hover a cell for details.</p>
+      <h2>Weekly growth ranking — last {n_weeks} weeks</h2>
+      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by their % change: <strong>1</strong> = best gain that week. Columns are sorted left to right by the <strong>sum of weekly ranks</strong> over the {n_weeks} weeks (since {weekly["start_week"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down; darker = bigger move that week. Hover a cell for details.</p>
       <div class="wr-scroll">
         <table class="wr-table">
           <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>
@@ -1155,12 +1157,14 @@ def render_weekly_rank_grid(weekly):
           <tbody>
 {"".join(body)}
           </tbody>
-          <tfoot><tr><th class="wr-week">Avg rank</th>{avg}</tr></tfoot>
+          <tfoot>
+            <tr class="wr-sum"><th class="wr-week">Sum of ranks</th>{sums}</tr>
+            <tr><th class="wr-week">{n_weeks}-week growth</th>{growth_cells}</tr>
+          </tfoot>
         </table>
       </div>
     </div>
 '''
-
 
 def join_windows(tfs):
     names = [TF_LABELS_SHORT[tf] for tf in tfs]
@@ -1727,7 +1731,9 @@ CSS = """
   .wr-rank { display: block; font-size: 14px; font-weight: 700; }
   .wr-detail { display: block; font-size: 9.5px; opacity: 0.85; }
   td.wr-na { color: var(--text-muted); }
-  table.wr-table tfoot td { color: var(--text-primary); font-weight: 600; border-top: 1px solid var(--gridline); border-radius: 0; }
+  table.wr-table tfoot td { color: var(--text-primary); font-weight: 600; border-radius: 0; }
+  table.wr-table tr.wr-sum td { font-size: 14px; border-top: 1px solid var(--gridline); }
+  table.wr-table td.wr-up { color: var(--div-in); } table.wr-table td.wr-down { color: var(--div-out); }
   @media (max-width: 720px) {
     .fut-charts { flex-direction: column; }
     .row-charts { flex-direction: column; }

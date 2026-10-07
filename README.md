@@ -41,14 +41,15 @@ This is an updated fork of the original `moneyflow` repo. What's new here:
   market) look like a fraction of the S&P 500 futures market's size, purely
   because of how it happens to be quoted. `FUTURES_CONTRACT_MULTIPLIER` in
   `money_flow.py` corrects for this per symbol.
-- **Weekly move ranking grid**, just under the Cross-asset money flow
+- **Weekly growth ranking grid**, just under the Cross-asset money flow
   charts: the last 26 weeks (Friday close to Friday close) for every asset on
-  that card, ranked each week by how big the move was relative to that
-  asset's usual weekly move -- the % change divided by the standard
-  deviation of its prior 52 weekly changes. Rank 1 = most unusual move that
-  week. Columns are sorted left to right by average rank over the 26 weeks
-  (footer row). Cells are blue (up) / red (down), darker for higher ranks. Built by `build_weekly_move_ranks()` /
-  `render_weekly_rank_grid()` in `money_flow.py`.
+  that card, ranked each week by % change (1 = best gain that week). Columns
+  are sorted left to right by the sum of those weekly ranks over the 26
+  weeks (lowest = best, on the left); the footer shows each sum and the
+  asset's total growth over the window.
+  Cells are blue (up) / red (down), darker for bigger moves that week. Built
+  by `build_weekly_move_ranks()` / `render_weekly_rank_grid()` in
+  `money_flow.py`.
 - **Equilibrium — RSI Reversion**, embedded directly at the bottom of
   `index.html` (the "Equilibrium view ↓" link at the top jumps straight to
   it — no separate page to open): DXY, the 10Y note (BONDS), ES=F (SPY),
