@@ -1102,11 +1102,12 @@ def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
 # HTML rendering
 # --------------------------------------------------------------------------
 
-def _weekly_rank_cell_style(pct, row_max_abs):
+def _weekly_rank_cell_style(pct, asset_max_abs):
     """Hue = direction (blue up / red down, the page's in/out colors);
-    strength = size of the move vs. the biggest move in that week's row, so
-    the best gainer is the darkest blue and the worst loser the darkest red."""
-    strength = 15 + 70 * (abs(pct) / row_max_abs if row_max_abs else 0)
+    strength = size of the move vs. that ASSET's own biggest weekly move in
+    the window, so each column is shaded on its own scale (a big week for
+    the dollar reads as dark as a big week for bitcoin)."""
+    strength = 15 + 70 * (abs(pct) / asset_max_abs if asset_max_abs else 0)
     var = "--div-in" if pct >= 0 else "--div-out"
     text = "#ffffff" if strength > 55 else "var(--text-primary)"
     return f"background: color-mix(in srgb, var({var}) {strength:.0f}%, var(--surface-1)); color: {text};"
@@ -1121,12 +1122,15 @@ def render_weekly_rank_grid(weekly):
         f'<th><span class="wr-name">{esc(name)}</span><span class="wr-tk">{esc(t)}</span></th>'
         for t, name in assets
     )
+    asset_max_abs = {
+        t: max((abs(r["cells"][t]["pct"]) for r in weekly["rows"] if t in r["cells"]), default=0)
+        for t, _ in assets
+    }
     body = []
     for row in weekly["rows"]:
         label = row["week"].strftime("%b %-d, %Y")
         if row["partial"]:
             label += " <em>(to date)</em>"
-        row_max_abs = max((abs(c["pct"]) for c in row["cells"].values()), default=0)
         tds = []
         for t, name in assets:
             c = row["cells"].get(t)
@@ -1135,7 +1139,7 @@ def render_weekly_rank_grid(weekly):
                 continue
             tip = f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}% — rank {c["rank"]} of {row["n"]}'
             tds.append(
-                f'<td style="{_weekly_rank_cell_style(c["pct"], row_max_abs)}" title="{esc(tip)}">'
+                f'<td style="{_weekly_rank_cell_style(c["pct"], asset_max_abs[t])}" title="{esc(tip)}">'
                 f'<span class="wr-rank">{c["rank"]}</span>'
                 f'<span class="wr-detail">{c["pct"]:+.1f}%</span></td>'
             )
@@ -1149,7 +1153,7 @@ def render_weekly_rank_grid(weekly):
     return f'''
     <div class="weekly-rank">
       <h2>Weekly growth ranking — last {n_weeks} weeks</h2>
-      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by their % change: <strong>1</strong> = best gain that week. Columns are sorted left to right by the <strong>sum of weekly ranks</strong> over the {n_weeks} weeks (since {weekly["start_week"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down; darker = bigger move that week. Hover a cell for details.</p>
+      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by their % change: <strong>1</strong> = best gain that week. Columns are sorted left to right by the <strong>sum of weekly ranks</strong> over the {n_weeks} weeks (since {weekly["start_week"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down; shading is relative to each asset's own moves — darker = a bigger week <em>for that asset</em> (its largest move in the window is darkest). Hover a cell for details.</p>
       <div class="wr-scroll">
         <table class="wr-table">
           <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>
