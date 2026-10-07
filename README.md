@@ -47,9 +47,8 @@ This is an updated fork of the original `moneyflow` repo. What's new here:
   are sorted left to right by the sum of those weekly ranks over the 26
   weeks (lowest = best, on the left); the footer shows each sum and the
   asset's total growth over the window.
-  Cells are blue (up) / red (down), shaded by how far the move is off that
-  asset's normal weekly move (std dev of its prior 52 weekly changes, σ);
-  2.5σ or more is darkest. Built
+  Cells are blue (up) / red (down), shaded relative to each asset's own
+  moves (its largest weekly move in the window is darkest). Built
   by `build_weekly_move_ranks()` / `render_weekly_rank_grid()` in
   `money_flow.py`.
 - **Equilibrium — RSI Reversion**, embedded directly at the bottom of
