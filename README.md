@@ -46,8 +46,8 @@ This is an updated fork of the original `moneyflow` repo. What's new here:
   that card, ranked each week by how big the move was relative to that
   asset's usual weekly move -- the % change divided by the standard
   deviation of its prior 52 weekly changes. Rank 1 = most unusual move that
-  week. Cells are blue (up) / red (down), darker for higher ranks, with an
-  average-rank footer. Built by `build_weekly_move_ranks()` /
+  week. Columns are sorted left to right by average rank over the 26 weeks
+  (footer row). Cells are blue (up) / red (down), darker for higher ranks. Built by `build_weekly_move_ranks()` /
   `render_weekly_rank_grid()` in `money_flow.py`.
 - **Equilibrium — RSI Reversion**, embedded directly at the bottom of
   `index.html` (the "Equilibrium view ↓" link at the top jumps straight to

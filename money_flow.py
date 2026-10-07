@@ -1086,7 +1086,15 @@ def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
         for rank, t in enumerate(sorted(cells, key=lambda t: -abs(cells[t]["z"])), start=1):
             cells[t]["rank"] = rank
         rows.append({"week": week, "partial": week > now.date(), "n": len(cells), "cells": cells})
-    return {"assets": [(a["ticker"], a["short_name"]) for a in available], "rows": rows}
+
+    # Columns left -> right by average rank over the window (lowest = most
+    # unusual mover); assets with no scored weeks go last.
+    def avg_rank(ticker):
+        ranks = [r["cells"][ticker]["rank"] for r in rows if ticker in r["cells"]]
+        return sum(ranks) / len(ranks) if ranks else float("inf")
+
+    ordered = sorted(available, key=lambda a: avg_rank(a["ticker"]))
+    return {"assets": [(a["ticker"], a["short_name"]) for a in ordered], "rows": rows}
 
 
 # --------------------------------------------------------------------------
@@ -1139,7 +1147,7 @@ def render_weekly_rank_grid(weekly):
     return f'''
     <div class="weekly-rank">
       <h2>Weekly move ranking — last {len(weekly["rows"])} weeks</h2>
-      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by how big their move was <em>relative to their own usual weekly move</em> — the % change divided by the standard deviation of that asset's prior {WEEKLY_RANK_BASELINE_WEEKS} weekly changes (σ). <strong>1</strong> = the most unusual move that week. Blue = up, red = down; darker = higher rank. Hover a cell for details.</p>
+      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by how big their move was <em>relative to their own usual weekly move</em> — the % change divided by the standard deviation of that asset's prior {WEEKLY_RANK_BASELINE_WEEKS} weekly changes (σ). <strong>1</strong> = the most unusual move that week. Columns are sorted left to right by average rank over these weeks. Blue = up, red = down; darker = higher rank. Hover a cell for details.</p>
       <div class="wr-scroll">
         <table class="wr-table">
           <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>
