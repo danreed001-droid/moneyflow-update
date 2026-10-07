@@ -1025,10 +1025,13 @@ def build_report():
 # Weekly growth ranking -- which cross-asset item gained the most each week
 # --------------------------------------------------------------------------
 
-WEEKLY_RANK_WEEKS = 26  # ~6 months of weeks shown in the grid
+WEEKLY_RANK_WEEKS = 26           # ~6 months of weeks shown in the grid
+WEEKLY_RANK_BASELINE_WEEKS = 52  # trailing weeks that define each asset's normal weekly move (for shading)
+WEEKLY_RANK_MIN_BASELINE = 20    # need at least this many prior weeks to shade a cell
+WEEKLY_RANK_SIGMA_CAP = 2.5      # moves this many normal moves or more get the darkest shade
 
 
-def fetch_weekly_closes(ticker, period="1y"):
+def fetch_weekly_closes(ticker, period="2y"):
     """[(week_ending_friday, close), ...] oldest -> newest, from daily bars.
     Weekend bars (BTC-USD trades 7 days) are dropped so every asset's week
     ends on the same Friday close and the weeks line up across the grid."""
@@ -1080,6 +1083,26 @@ def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
             cells[t]["rank"] = rank
         rows.append({"week": week, "partial": week > now.date(), "n": len(cells), "cells": cells})
         prev = week
+
+    # Shading: how big each week's move is vs. that asset's NORMAL weekly
+    # move -- the std dev of its prior WEEKLY_RANK_BASELINE_WEEKS weekly
+    # changes. z = pct / sigma, so 2.0 = twice its usual weekly move.
+    for t in closes_by_ticker:
+        weeks_t = sorted(closes_by_ticker[t])
+        changes = {w: pct(t, pw, w) for pw, w in zip(weeks_t, weeks_t[1:])}
+        history = [(w, c) for w, c in sorted(changes.items()) if c is not None]
+        for row in rows:
+            cell = row["cells"].get(t)
+            if not cell:
+                continue
+            prior = [c for w, c in history if w < row["week"]][-WEEKLY_RANK_BASELINE_WEEKS:]
+            if len(prior) < WEEKLY_RANK_MIN_BASELINE:
+                continue
+            mean = sum(prior) / len(prior)
+            sigma = (sum((c - mean) ** 2 for c in prior) / (len(prior) - 1)) ** 0.5
+            if sigma > 0:
+                cell["sigma"] = sigma
+                cell["z"] = cell["pct"] / sigma
     rows.reverse()  # newest first
 
     growth = {t: pct(t, start_week, shown[-1]) for t in closes_by_ticker}
@@ -1102,12 +1125,12 @@ def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
 # HTML rendering
 # --------------------------------------------------------------------------
 
-def _weekly_rank_cell_style(pct, asset_max_abs):
+def _weekly_rank_cell_style(pct, z):
     """Hue = direction (blue up / red down, the page's in/out colors);
-    strength = size of the move vs. that ASSET's own biggest weekly move in
-    the window, so each column is shaded on its own scale (a big week for
-    the dollar reads as dark as a big week for bitcoin)."""
-    strength = 15 + 70 * (abs(pct) / asset_max_abs if asset_max_abs else 0)
+    strength = how far the move is off that asset's normal weekly move
+    (|z|, capped at WEEKLY_RANK_SIGMA_CAP), so a 2-sigma week for the
+    dollar reads as dark as a 2-sigma week for bitcoin."""
+    strength = 15 + 70 * (min(abs(z) / WEEKLY_RANK_SIGMA_CAP, 1.0) if z is not None else 0)
     var = "--div-in" if pct >= 0 else "--div-out"
     text = "#ffffff" if strength > 55 else "var(--text-primary)"
     return f"background: color-mix(in srgb, var({var}) {strength:.0f}%, var(--surface-1)); color: {text};"
@@ -1122,10 +1145,6 @@ def render_weekly_rank_grid(weekly):
         f'<th><span class="wr-name">{esc(name)}</span><span class="wr-tk">{esc(t)}</span></th>'
         for t, name in assets
     )
-    asset_max_abs = {
-        t: max((abs(r["cells"][t]["pct"]) for r in weekly["rows"] if t in r["cells"]), default=0)
-        for t, _ in assets
-    }
     body = []
     for row in weekly["rows"]:
         label = row["week"].strftime("%b %-d, %Y")
@@ -1137,11 +1156,14 @@ def render_weekly_rank_grid(weekly):
             if not c:
                 tds.append('<td class="wr-na">–</td>')
                 continue
-            tip = f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}% — rank {c["rank"]} of {row["n"]}'
+            z = c.get("z")
+            normal = f' vs. normal ±{c["sigma"]:.2f}% ({abs(z):.1f}× normal)' if z is not None else ""
+            tip = f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}%{normal} — rank {c["rank"]} of {row["n"]}'
+            detail = f'{c["pct"]:+.1f}%' + (f' · {abs(z):.1f}σ' if z is not None else "")
             tds.append(
-                f'<td style="{_weekly_rank_cell_style(c["pct"], asset_max_abs[t])}" title="{esc(tip)}">'
+                f'<td style="{_weekly_rank_cell_style(c["pct"], z)}" title="{esc(tip)}">'
                 f'<span class="wr-rank">{c["rank"]}</span>'
-                f'<span class="wr-detail">{c["pct"]:+.1f}%</span></td>'
+                f'<span class="wr-detail">{detail}</span></td>'
             )
         body.append(f'<tr><th class="wr-week">{label}</th>{"".join(tds)}</tr>')
     growth_cells = "".join(
@@ -1153,7 +1175,7 @@ def render_weekly_rank_grid(weekly):
     return f'''
     <div class="weekly-rank">
       <h2>Weekly growth ranking — last {n_weeks} weeks</h2>
-      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by their % change: <strong>1</strong> = best gain that week. Columns are sorted left to right by the <strong>sum of weekly ranks</strong> over the {n_weeks} weeks (since {weekly["start_week"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down; shading is relative to each asset's own moves — darker = a bigger week <em>for that asset</em> (its largest move in the window is darkest). Hover a cell for details.</p>
+      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by their % change: <strong>1</strong> = best gain that week. Columns are sorted left to right by the <strong>sum of weekly ranks</strong> over the {n_weeks} weeks (since {weekly["start_week"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down; shading shows how far the move is off that asset's <em>normal</em> weekly move (σ = std dev of its prior {WEEKLY_RANK_BASELINE_WEEKS} weekly changes) — pale = a normal week, darkest = {WEEKLY_RANK_SIGMA_CAP:g}σ or more. Hover a cell for details.</p>
       <div class="wr-scroll">
         <table class="wr-table">
           <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>
