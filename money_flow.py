@@ -23,7 +23,7 @@ import html
 import json
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     import yfinance as yf
@@ -1022,8 +1022,145 @@ def build_report():
 
 
 # --------------------------------------------------------------------------
+# Weekly move ranking -- which cross-asset item moved most vs. its usual week
+# --------------------------------------------------------------------------
+
+WEEKLY_RANK_WEEKS = 26           # ~6 months of weeks shown in the grid
+WEEKLY_RANK_BASELINE_WEEKS = 52  # trailing weeks that define each asset's "usual" weekly move
+WEEKLY_RANK_MIN_BASELINE = 20    # need at least this many prior weeks to score a week
+
+
+def fetch_weekly_closes(ticker, period="2y"):
+    """[(week_ending_friday, close), ...] oldest -> newest, from daily bars.
+    Weekend bars (BTC-USD trades 7 days) are dropped so every asset's week
+    ends on the same Friday close and the weeks line up across the grid."""
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval="1d")
+    except Exception as e:
+        print(f"  [warn] weekly fetch failed for {ticker}: {e}", file=sys.stderr)
+        return []
+    by_week = {}
+    for ts, close in zip(hist.index, hist["Close"]):
+        if close is None or close != close:
+            continue
+        d = ts.date()
+        if d.weekday() >= 5:
+            continue
+        by_week[d + timedelta(days=4 - d.weekday())] = float(close)  # last close of the week wins
+    return sorted(by_week.items())
+
+
+def weekly_move_scores(weekly_closes, baseline_weeks=WEEKLY_RANK_BASELINE_WEEKS,
+                       min_baseline=WEEKLY_RANK_MIN_BASELINE):
+    """{week_ending: {"pct", "sigma", "z"}} -- each week's % change scored
+    against the standard deviation of the asset's PRIOR `baseline_weeks`
+    weekly % changes (its usual weekly move). z = pct / sigma, so a 2.0
+    means the asset moved twice its normal weekly amount."""
+    changes = []
+    for (_, prev), (week, close) in zip(weekly_closes, weekly_closes[1:]):
+        if prev:
+            changes.append((week, (close - prev) / prev * 100))
+    scores = {}
+    for i, (week, pct) in enumerate(changes):
+        prior = [c for _, c in changes[max(0, i - baseline_weeks):i]]
+        if len(prior) < min_baseline:
+            continue
+        mean = sum(prior) / len(prior)
+        sigma = (sum((c - mean) ** 2 for c in prior) / (len(prior) - 1)) ** 0.5
+        if sigma > 0:
+            scores[week] = {"pct": pct, "sigma": sigma, "z": pct / sigma}
+    return scores
+
+
+def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
+    """Ranks the cross-asset card's items each week by |z| (1 = biggest move
+    relative to its usual weekly move). Returns None if nothing scored."""
+    available = [a for a in assets if not a.get("unavailable")]
+    scores_by_ticker = {a["ticker"]: weekly_move_scores(fetch_weekly_closes(a["ticker"])) for a in available}
+    all_weeks = sorted({w for sc in scores_by_ticker.values() for w in sc}, reverse=True)[:weeks]
+    if not all_weeks:
+        return None
+    rows = []
+    for week in all_weeks:
+        cells = {t: dict(sc[week]) for t, sc in scores_by_ticker.items() if week in sc}
+        for rank, t in enumerate(sorted(cells, key=lambda t: -abs(cells[t]["z"])), start=1):
+            cells[t]["rank"] = rank
+        rows.append({"week": week, "partial": week > now.date(), "n": len(cells), "cells": cells})
+
+    # Columns left -> right by average rank over the window (lowest = most
+    # unusual mover); assets with no scored weeks go last.
+    def avg_rank(ticker):
+        ranks = [r["cells"][ticker]["rank"] for r in rows if ticker in r["cells"]]
+        return sum(ranks) / len(ranks) if ranks else float("inf")
+
+    ordered = sorted(available, key=lambda a: avg_rank(a["ticker"]))
+    return {"assets": [(a["ticker"], a["short_name"]) for a in ordered], "rows": rows}
+
+
+# --------------------------------------------------------------------------
 # HTML rendering
 # --------------------------------------------------------------------------
+
+def _weekly_rank_cell_style(rank, n, direction):
+    """Background shade: hue = direction (blue up / red down, the page's
+    in/out colors), strength = rank (rank 1 darkest)."""
+    strength = 85 - (rank - 1) * (70 / max(n - 1, 1))
+    var = "--div-in" if direction >= 0 else "--div-out"
+    text = "#ffffff" if strength > 55 else "var(--text-primary)"
+    return f"background: color-mix(in srgb, var({var}) {strength:.0f}%, var(--surface-1)); color: {text};"
+
+
+def render_weekly_rank_grid(weekly):
+    if not weekly:
+        return ""
+    esc = html.escape
+    assets = weekly["assets"]
+    head = "".join(
+        f'<th><span class="wr-name">{esc(name)}</span><span class="wr-tk">{esc(t)}</span></th>'
+        for t, name in assets
+    )
+    body = []
+    rank_totals = {t: [] for t, _ in assets}
+    for row in weekly["rows"]:
+        label = row["week"].strftime("%b %-d, %Y")
+        if row["partial"]:
+            label += " <em>(to date)</em>"
+        tds = []
+        for t, name in assets:
+            c = row["cells"].get(t)
+            if not c:
+                tds.append('<td class="wr-na">–</td>')
+                continue
+            rank_totals[t].append(c["rank"])
+            tip = (f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}% vs. usual '
+                   f'±{c["sigma"]:.2f}% ({abs(c["z"]):.1f}× normal) — rank {c["rank"]} of {row["n"]}')
+            tds.append(
+                f'<td style="{_weekly_rank_cell_style(c["rank"], row["n"], c["pct"])}" title="{esc(tip)}">'
+                f'<span class="wr-rank">{c["rank"]}</span>'
+                f'<span class="wr-detail">{c["pct"]:+.1f}% · {abs(c["z"]):.1f}σ</span></td>'
+            )
+        body.append(f'<tr><th class="wr-week">{label}</th>{"".join(tds)}</tr>')
+    avg = "".join(
+        f'<td>{sum(r) / len(r):.1f}</td>' if r else '<td class="wr-na">–</td>'
+        for r in rank_totals.values()
+    )
+    return f'''
+    <div class="weekly-rank">
+      <h2>Weekly move ranking — last {len(weekly["rows"])} weeks</h2>
+      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by how big their move was <em>relative to their own usual weekly move</em> — the % change divided by the standard deviation of that asset's prior {WEEKLY_RANK_BASELINE_WEEKS} weekly changes (σ). <strong>1</strong> = the most unusual move that week. Columns are sorted left to right by average rank over these weeks. Blue = up, red = down; darker = higher rank. Hover a cell for details.</p>
+      <div class="wr-scroll">
+        <table class="wr-table">
+          <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>
+          <thead><tr><th class="wr-week">Week ending</th>{head}</tr></thead>
+          <tbody>
+{"".join(body)}
+          </tbody>
+          <tfoot><tr><th class="wr-week">Avg rank</th>{avg}</tr></tfoot>
+        </table>
+      </div>
+    </div>
+'''
+
 
 def join_windows(tfs):
     names = [TF_LABELS_SHORT[tf] for tf in tfs]
@@ -1575,6 +1712,22 @@ CSS = """
   .card.card-wide { max-width: 1120px; }
   .row-charts { display: flex; gap: 18px; align-items: flex-start; margin-top: 4px; }
   .row-chart-col { flex: 1 1 0; min-width: 0; }
+  .weekly-rank { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--gridline); }
+  .weekly-rank h2 { margin: 0; font-size: 15px; font-weight: 650; color: var(--text-primary); }
+  .wr-sub { margin: 6px 0 12px; font-size: 12px; color: var(--text-secondary); line-height: 1.5; max-width: 90ch; }
+  .wr-scroll { overflow-x: auto; }
+  table.wr-table { width: 100%; border-collapse: separate; border-spacing: 3px; font-size: 11.5px; font-variant-numeric: tabular-nums; min-width: 640px; table-layout: fixed; }
+  table.wr-table col.wr-week-col { width: 118px; }
+  table.wr-table th { font-weight: 600; color: var(--text-muted); font-size: 10.5px; text-align: center; padding: 4px 2px; }
+  table.wr-table th.wr-week { text-align: left; white-space: nowrap; color: var(--text-secondary); padding-right: 8px; }
+  table.wr-table th.wr-week em { font-weight: 400; color: var(--text-muted); }
+  .wr-name { display: block; color: var(--text-primary); }
+  .wr-tk { display: block; font-weight: 400; font-size: 9.5px; }
+  table.wr-table td { text-align: center; padding: 5px 2px; border-radius: 6px; line-height: 1.2; }
+  .wr-rank { display: block; font-size: 14px; font-weight: 700; }
+  .wr-detail { display: block; font-size: 9.5px; opacity: 0.85; }
+  td.wr-na { color: var(--text-muted); }
+  table.wr-table tfoot td { color: var(--text-primary); font-weight: 600; border-top: 1px solid var(--gridline); border-radius: 0; }
   @media (max-width: 720px) {
     .fut-charts { flex-direction: column; }
     .row-charts { flex-direction: column; }
@@ -1601,7 +1754,7 @@ SCRIPT = """
 """
 
 
-def render_html(assets, now, futures=None):
+def render_html(assets, now, futures=None, weekly=None):
     esc = html.escape
     as_of = now.strftime("%Y-%m-%d %H:%M UTC")
     available_assets = [a for a in assets if not a.get("unavailable")]
@@ -1663,6 +1816,7 @@ def render_html(assets, now, futures=None):
     </div>
     <div class="rows">
 {rows_html}    </div>
+{render_weekly_rank_grid(weekly)}
 
     <div class="blurb"><strong>Across all three windows:</strong> {summary}</div>
 
@@ -2683,6 +2837,7 @@ def send_ntfy(text, topic):
 def main():
     report, assets, now = build_report()
     futures = build_futures()
+    weekly = build_weekly_move_ranks(assets, now)
     full_report = report + "\n\n" + "\n".join(render_futures_text(futures))
     print(full_report)
 
@@ -2701,7 +2856,7 @@ def main():
     # index.html so it also works out of the box if you enable GitHub Pages
     # (Settings -> Pages -> Deploy from branch -> main -> / (root)).
     with open("index.html", "w") as f:
-        f.write(render_html(assets, now, futures))
+        f.write(render_html(assets, now, futures, weekly))
 
     # Equilibrium -- RSI Reversion: same 6 core assets, seeded each run from
     # their live current hourly RSI(14).
