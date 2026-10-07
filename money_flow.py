@@ -1022,80 +1022,82 @@ def build_report():
 
 
 # --------------------------------------------------------------------------
-# Weekly growth ranking -- which cross-asset item gained the most each week
+# Growth ranking grid -- which cross-asset item gained the most each period
+# (weekly and daily views, toggled on the page)
 # --------------------------------------------------------------------------
 
-WEEKLY_RANK_WEEKS = 26           # ~6 months of weeks shown in the grid
+WEEKLY_RANK_WEEKS = 26           # ~6 months of weeks shown in the weekly grid
 WEEKLY_RANK_BASELINE_WEEKS = 52  # trailing weeks that define each asset's normal weekly move (sigma shading)
-WEEKLY_RANK_MIN_BASELINE = 20    # need at least this many prior weeks for a sigma
+DAILY_RANK_DAYS = 30             # trading days shown in the daily grid
+DAILY_RANK_BASELINE_DAYS = 60    # trailing days that define each asset's normal daily move (sigma shading)
+WEEKLY_RANK_MIN_BASELINE = 20    # need at least this many prior periods for a sigma
 WEEKLY_RANK_SIGMA_CAP = 2.5      # moves this many normal moves or more get the darkest sigma shade
 
 
-def fetch_weekly_closes(ticker, period="2y"):
-    """[(week_ending_friday, close), ...] oldest -> newest, from daily bars.
-    Weekend bars (BTC-USD trades 7 days) are dropped so every asset's week
-    ends on the same Friday close and the weeks line up across the grid."""
+def fetch_daily_closes(ticker, period="2y"):
+    """{date: close} from daily bars, weekdays only -- BTC-USD's weekend bars
+    are dropped so every asset is measured over the same sessions."""
     try:
         hist = yf.Ticker(ticker).history(period=period, interval="1d")
     except Exception as e:
-        print(f"  [warn] weekly fetch failed for {ticker}: {e}", file=sys.stderr)
-        return []
-    by_week = {}
+        print(f"  [warn] daily ranking fetch failed for {ticker}: {e}", file=sys.stderr)
+        return {}
+    out = {}
     for ts, close in zip(hist.index, hist["Close"]):
         if close is None or close != close:
             continue
         d = ts.date()
-        if d.weekday() >= 5:
-            continue
-        by_week[d + timedelta(days=4 - d.weekday())] = float(close)  # last close of the week wins
-    return sorted(by_week.items())
+        if d.weekday() < 5:
+            out[d] = float(close)
+    return out
 
 
-def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
-    """Ranks the cross-asset card's items each week by % change (1 = best
-    gain), and orders the columns by the sum of those weekly ranks over the
-    window (lowest = best, on the left). Returns None if no weekly data came back."""
-    available = [a for a in assets if not a.get("unavailable")]
-    closes_by_ticker = {a["ticker"]: dict(fetch_weekly_closes(a["ticker"])) for a in available}
-    all_weeks = sorted({w for c in closes_by_ticker.values() for w in c})
-    shown = all_weeks[-weeks:]
-    if len(all_weeks) < 2 or not shown:
+def weekly_from_daily(daily):
+    """{week_ending_friday: last close of that week} from {date: close}."""
+    by_week = {}
+    for d in sorted(daily):
+        by_week[d + timedelta(days=4 - d.weekday())] = daily[d]
+    return by_week
+
+
+def _build_rank_grid(available, closes_by_ticker, periods, partial_after, baseline):
+    """Ranks the assets each period by % change from the previous period
+    (1 = best gain) and orders the columns by the sum of those ranks
+    (lowest = best, on the left). `periods` is the list of period keys to
+    show, preceded by the start period: periods[0] is only the base the
+    first shown change is measured from."""
+    if len(periods) < 2:
         return None
-    start_week = all_weeks[-weeks - 1] if len(all_weeks) > weeks else all_weeks[0]
-    if start_week == shown[0]:
-        shown = shown[1:]
+    start, shown = periods[0], periods[1:]
 
-    def pct(ticker, prev_week, week):
+    def pct(ticker, prev, cur):
         c = closes_by_ticker[ticker]
-        if prev_week in c and week in c and c[prev_week]:
-            return (c[week] - c[prev_week]) / c[prev_week] * 100
+        if prev in c and cur in c and c[prev]:
+            return (c[cur] - c[prev]) / c[prev] * 100
         return None
 
     rows = []
-    prev = start_week
-    for week in shown:
+    for prev, cur in zip(periods, shown):
         cells = {}
         for t in closes_by_ticker:
-            p = pct(t, prev, week)
+            p = pct(t, prev, cur)
             if p is not None:
                 cells[t] = {"pct": p}
         for rank, t in enumerate(sorted(cells, key=lambda t: -cells[t]["pct"]), start=1):
             cells[t]["rank"] = rank
-        rows.append({"week": week, "partial": week > now.date(), "n": len(cells), "cells": cells})
-        prev = week
+        rows.append({"period": cur, "partial": cur > partial_after, "n": len(cells), "cells": cells})
 
-    # For the "vs. normal" shading option: how big each week's move is vs.
-    # that asset's NORMAL weekly move -- the std dev of its prior
-    # WEEKLY_RANK_BASELINE_WEEKS weekly changes. z = pct / sigma, so 2.0 =
-    # twice its usual weekly move.
+    # For the "vs. normal" shading option: how big each move is vs. that
+    # asset's NORMAL move for this period length -- the std dev of its prior
+    # `baseline` changes. z = pct / sigma, so 2.0 = twice its usual move.
     for t in closes_by_ticker:
-        weeks_t = sorted(closes_by_ticker[t])
-        history = [(w, c) for w, c in ((w, pct(t, pw, w)) for pw, w in zip(weeks_t, weeks_t[1:])) if c is not None]
+        keys = sorted(closes_by_ticker[t])
+        history = [(k, c) for k, c in ((k, pct(t, pk, k)) for pk, k in zip(keys, keys[1:])) if c is not None]
         for row in rows:
             cell = row["cells"].get(t)
             if not cell:
                 continue
-            prior = [c for w, c in history if w < row["week"]][-WEEKLY_RANK_BASELINE_WEEKS:]
+            prior = [c for k, c in history if k < row["period"]][-baseline:]
             if len(prior) < WEEKLY_RANK_MIN_BASELINE:
                 continue
             mean = sum(prior) / len(prior)
@@ -1105,9 +1107,9 @@ def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
                 cell["z"] = cell["pct"] / sigma
     rows.reverse()  # newest first
 
-    growth = {t: pct(t, start_week, shown[-1]) for t in closes_by_ticker}
-    # Sum of weekly ranks, lowest = best; a week an asset has no data for
-    # counts as last place so a gap can't make it look better.
+    growth = {t: pct(t, start, shown[-1]) for t in closes_by_ticker}
+    # Sum of ranks, lowest = best; a period an asset has no data for counts
+    # as last place so a gap can't make it look better.
     rank_sum = {
         t: sum(r["cells"][t]["rank"] if t in r["cells"] else len(closes_by_ticker) for r in rows)
         for t in closes_by_ticker
@@ -1118,8 +1120,35 @@ def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS):
         "rows": rows,
         "growth": growth,
         "rank_sum": rank_sum,
-        "start_week": start_week,
+        "start": start,
     }
+
+
+def build_weekly_move_ranks(assets, now, weeks=WEEKLY_RANK_WEEKS, days=DAILY_RANK_DAYS):
+    """{"weekly": grid, "daily": grid} for the cross-asset card's items (see
+    _build_rank_grid), from one daily-bar fetch per asset. Weekly = Friday
+    close to Friday close over the last `weeks` weeks; daily = session to
+    session over the last `days` trading days, using only days every asset
+    traded so a holiday can't leave one asset ranked alone. Returns None if
+    no data came back."""
+    available = [a for a in assets if not a.get("unavailable")]
+    daily = {a["ticker"]: fetch_daily_closes(a["ticker"]) for a in available}
+    daily = {t: c for t, c in daily.items() if c}
+    if not daily:
+        return None
+    available = [a for a in available if a["ticker"] in daily]
+    today = now.date()
+
+    weekly = {t: weekly_from_daily(c) for t, c in daily.items()}
+    all_weeks = sorted({w for c in weekly.values() for w in c})
+    week_grid = _build_rank_grid(available, weekly, all_weeks[-(weeks + 1):], today, WEEKLY_RANK_BASELINE_WEEKS)
+
+    common_days = sorted(set.intersection(*(set(c) for c in daily.values())))
+    day_grid = _build_rank_grid(available, daily, common_days[-(days + 1):], today - timedelta(days=1),
+                                DAILY_RANK_BASELINE_DAYS)
+    if not week_grid and not day_grid:
+        return None
+    return {"weekly": week_grid, "daily": day_grid}
 
 # --------------------------------------------------------------------------
 # HTML rendering
@@ -1136,9 +1165,9 @@ def _weekly_rank_shade(pct, frac, mode):
 
 def _weekly_rank_cell_style(c, asset_max_abs):
     """Both shading options, toggled on the page:
-      range -- the move vs. that ASSET's own biggest weekly move in the
-               window (each column on its own scale);
-      sigma -- the move vs. the asset's normal weekly move (|z|, capped at
+      range -- the move vs. that ASSET's own biggest move in the window
+               (each column on its own scale);
+      sigma -- the move vs. the asset's normal move (|z|, capped at
                WEEKLY_RANK_SIGMA_CAP)."""
     z = c.get("z")
     return (
@@ -1147,24 +1176,29 @@ def _weekly_rank_cell_style(c, asset_max_abs):
     )
 
 
-def render_weekly_rank_grid(weekly):
-    if not weekly:
-        return ""
+def _render_rank_table(grid, view):
+    """One ranking table (view = "weekly" or "daily")."""
     esc = html.escape
-    assets = weekly["assets"]
+    weekly = view == "weekly"
+    unit, units, adj = ("week", "weeks", "weekly") if weekly else ("day", "days", "daily")
+    if not grid:
+        return f'<div class="wr-view" data-view="{view}"><p class="wr-sub">{adj.capitalize()} data unavailable this run.</p></div>'
+    assets = grid["assets"]
     head = "".join(
         f'<th><span class="wr-name">{esc(name)}</span><span class="wr-tk">{esc(t)}</span></th>'
         for t, name in assets
     )
     asset_max_abs = {
-        t: max((abs(r["cells"][t]["pct"]) for r in weekly["rows"] if t in r["cells"]), default=0)
+        t: max((abs(r["cells"][t]["pct"]) for r in grid["rows"] if t in r["cells"]), default=0)
         for t, _ in assets
     }
     body = []
-    for row in weekly["rows"]:
-        label = row["week"].strftime("%b %-d, %Y")
+    for row in grid["rows"]:
+        d = row["period"]
+        label = d.strftime("%b %-d, %Y") if weekly else d.strftime("%a %b %-d")
         if row["partial"]:
-            label += " <em>(to date)</em>"
+            label += " <em>(to date)</em>" if weekly else " <em>(live)</em>"
+        when = f"week ending {d:%b %-d}" if weekly else f"{d:%a %b %-d}"
         tds = []
         for t, name in assets:
             c = row["cells"].get(t)
@@ -1173,7 +1207,7 @@ def render_weekly_rank_grid(weekly):
                 continue
             z = c.get("z")
             normal = f' vs. normal ±{c["sigma"]:.2f}% ({abs(z):.1f}× normal)' if z is not None else ""
-            tip = f'{name}, week ending {row["week"]:%b %-d}: {c["pct"]:+.2f}%{normal} — rank {c["rank"]} of {row["n"]}'
+            tip = f'{name}, {when}: {c["pct"]:+.2f}%{normal} — rank {c["rank"]} of {row["n"]}'
             z_html = f'<span class="wr-z"> · {abs(z):.1f}σ</span>' if z is not None else ""
             tds.append(
                 f'<td style="{_weekly_rank_cell_style(c, asset_max_abs[t])}" title="{esc(tip)}">'
@@ -1183,35 +1217,49 @@ def render_weekly_rank_grid(weekly):
         body.append(f'<tr><th class="wr-week">{label}</th>{"".join(tds)}</tr>')
     growth_cells = "".join(
         f'<td class="{"wr-up" if g >= 0 else "wr-down"}">{g:+.1f}%</td>' if g is not None else '<td class="wr-na">–</td>'
-        for g in (weekly["growth"].get(t) for t, _ in assets)
+        for g in (grid["growth"].get(t) for t, _ in assets)
     )
-    sums = "".join(f'<td>{weekly["rank_sum"][t]}</td>' for t, _ in assets)
-    n_weeks = len(weekly["rows"])
-    return f'''
-    <div class="weekly-rank" id="weeklyRank" data-mode="range">
-      <h2>Weekly growth ranking — last {n_weeks} weeks</h2>
-      <p class="wr-sub">Each week (Friday close to Friday close), the assets above are ranked by their % change: <strong>1</strong> = best gain that week. Columns are sorted left to right by the <strong>sum of weekly ranks</strong> over the {n_weeks} weeks (since {weekly["start_week"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down. Hover a cell for details.</p>
-      <div class="wr-modes" role="group" aria-label="Shading">
-        <span class="wr-modes-label">Shade by:</span>
-        <button type="button" class="wr-mode" data-mode="range" aria-pressed="true">Own range</button>
-        <button type="button" class="wr-mode" data-mode="sigma" aria-pressed="false">vs. normal move (σ)</button>
-      </div>
-      <p class="wr-mode-note" data-for="range">Darker = a bigger week <em>for that asset</em> — each column's largest move in the window is darkest.</p>
-      <p class="wr-mode-note" data-for="sigma">Darker = further off that asset's <em>normal</em> weekly move (σ = std dev of its prior {WEEKLY_RANK_BASELINE_WEEKS} weekly changes) — pale = a normal week, darkest = {WEEKLY_RANK_SIGMA_CAP:g}σ or more.</p>
+    sums = "".join(f'<td>{grid["rank_sum"][t]}</td>' for t, _ in assets)
+    n = len(grid["rows"])
+    period_desc = "Friday close to Friday close" if weekly else "close to close, trading days every asset traded"
+    return f'''      <div class="wr-view" data-view="{view}">
+      <p class="wr-sub">Each {unit} ({period_desc}), the assets above are ranked by their % change: <strong>1</strong> = best gain that {unit}. Columns are sorted left to right by the <strong>sum of {adj} ranks</strong> over the last {n} {units} (since {grid["start"]:%b %-d, %Y}) — lowest sum = best, on the left. Blue = up, red = down. Hover a cell for details.</p>
       <div class="wr-scroll">
         <table class="wr-table">
           <colgroup><col class="wr-week-col">{"<col>" * len(assets)}</colgroup>
-          <thead><tr><th class="wr-week">Week ending</th>{head}</tr></thead>
+          <thead><tr><th class="wr-week">{"Week ending" if weekly else "Day"}</th>{head}</tr></thead>
           <tbody>
 {"".join(body)}
           </tbody>
           <tfoot>
             <tr class="wr-sum"><th class="wr-week">Sum of ranks</th>{sums}</tr>
-            <tr><th class="wr-week">{n_weeks}-week growth</th>{growth_cells}</tr>
+            <tr><th class="wr-week">{n}-{unit} growth</th>{growth_cells}</tr>
           </tfoot>
         </table>
       </div>
-    </div>
+      </div>
+'''
+
+
+def render_weekly_rank_grid(ranks):
+    if not ranks:
+        return ""
+    return f'''
+    <div class="weekly-rank" id="weeklyRank" data-mode="range" data-view="weekly">
+      <h2>Growth ranking</h2>
+      <div class="wr-modes" role="group" aria-label="View">
+        <span class="wr-modes-label">View:</span>
+        <button type="button" class="wr-view-btn" data-view="weekly" aria-pressed="true">Weekly · {WEEKLY_RANK_WEEKS} weeks</button>
+        <button type="button" class="wr-view-btn" data-view="daily" aria-pressed="false">Daily · {DAILY_RANK_DAYS} days</button>
+      </div>
+      <div class="wr-modes" role="group" aria-label="Shading">
+        <span class="wr-modes-label">Shade by:</span>
+        <button type="button" class="wr-mode" data-mode="range" aria-pressed="true">Own range</button>
+        <button type="button" class="wr-mode" data-mode="sigma" aria-pressed="false">vs. normal move (σ)</button>
+      </div>
+      <p class="wr-mode-note" data-for="range">Darker = a bigger move <em>for that asset</em> — each column's largest move in the window is darkest.</p>
+      <p class="wr-mode-note" data-for="sigma">Darker = further off that asset's <em>normal</em> move (σ = std dev of its prior {WEEKLY_RANK_BASELINE_WEEKS} weekly / {DAILY_RANK_BASELINE_DAYS} daily changes) — pale = a normal move, darkest = {WEEKLY_RANK_SIGMA_CAP:g}σ or more.</p>
+{_render_rank_table(ranks.get("weekly"), "weekly")}{_render_rank_table(ranks.get("daily"), "daily")}    </div>
 '''
 
 def join_windows(tfs):
@@ -1782,8 +1830,10 @@ CSS = """
   table.wr-table tbody td:not(.wr-na) { background: var(--wr-bg-range); color: var(--wr-fg-range); }
   .weekly-rank[data-mode="sigma"] table.wr-table tbody td:not(.wr-na) { background: var(--wr-bg-sigma); color: var(--wr-fg-sigma); }
   .weekly-rank[data-mode="range"] .wr-z { display: none; }
+  .weekly-rank[data-view="weekly"] .wr-view[data-view="daily"], .weekly-rank[data-view="daily"] .wr-view[data-view="weekly"] { display: none; }
   .wr-modes { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 6px; font-size: 12px; color: var(--text-secondary); }
-  .wr-mode { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  .wr-mode, .wr-view-btn { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  .wr-view-btn[aria-pressed="true"],
   .wr-mode[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
   .wr-mode-note { margin: 0 0 10px; font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
   .weekly-rank[data-mode="range"] .wr-mode-note[data-for="sigma"], .weekly-rank[data-mode="sigma"] .wr-mode-note[data-for="range"] { display: none; }
@@ -1800,16 +1850,21 @@ SCRIPT = """
   (function () {
     const wr = document.getElementById('weeklyRank');
     if (!wr) return;
-    const buttons = wr.querySelectorAll('.wr-mode');
-    function setMode(mode) {
-      wr.setAttribute('data-mode', mode);
-      buttons.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
-      try { localStorage.setItem('wrShadeMode', mode); } catch (e) {}
+    // Two independent toggles: shading (data-mode) and weekly/daily (data-view).
+    function toggle(selector, attr, key, values) {
+      const buttons = wr.querySelectorAll(selector);
+      function set(value) {
+        wr.setAttribute('data-' + attr, value);
+        buttons.forEach(b => b.setAttribute('aria-pressed', String(b.dataset[attr] === value)));
+        try { localStorage.setItem(key, value); } catch (e) {}
+      }
+      buttons.forEach(b => b.addEventListener('click', () => set(b.dataset[attr])));
+      let saved = null;
+      try { saved = localStorage.getItem(key); } catch (e) {}
+      if (values.includes(saved)) set(saved);
     }
-    buttons.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
-    let saved = null;
-    try { saved = localStorage.getItem('wrShadeMode'); } catch (e) {}
-    if (saved === 'range' || saved === 'sigma') setMode(saved);
+    toggle('.wr-mode', 'mode', 'wrShadeMode', ['range', 'sigma']);
+    toggle('.wr-view-btn', 'view', 'wrView', ['weekly', 'daily']);
   })();
   const btn = document.getElementById('themeToggle');
   const root = document.documentElement;

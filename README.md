@@ -41,18 +41,19 @@ This is an updated fork of the original `moneyflow` repo. What's new here:
   market) look like a fraction of the S&P 500 futures market's size, purely
   because of how it happens to be quoted. `FUTURES_CONTRACT_MULTIPLIER` in
   `money_flow.py` corrects for this per symbol.
-- **Weekly growth ranking grid**, just under the Cross-asset money flow
-  charts: the last 26 weeks (Friday close to Friday close) for every asset on
-  that card, ranked each week by % change (1 = best gain that week). Columns
-  are sorted left to right by the sum of those weekly ranks over the 26
-  weeks (lowest = best, on the left); the footer shows each sum and the
-  asset's total growth over the window.
-  Cells are blue (up) / red (down), with a toggle for two shading options:
-  **Own range** (each asset's largest weekly move in the window is darkest)
-  or **vs. normal move** (how far the move is off the asset's normal week --
-  std dev of its prior 52 weekly changes, σ; 2.5σ or more is darkest). The
-  choice is remembered in the viewer's browser. Built
-  by `build_weekly_move_ranks()` / `render_weekly_rank_grid()` in
+- **Growth ranking grid**, just under the Cross-asset money flow charts,
+  with a **Weekly / Daily** toggle: the last 26 weeks (Friday close to
+  Friday close) or the last 30 trading days (close to close, only days
+  every asset traded) for every asset on that card, ranked each period by
+  % change (1 = best gain). Columns are sorted left to right by the sum of
+  those ranks over the window (lowest = best, on the left); the footer
+  shows each sum and the asset's total growth over the window. Cells are
+  blue (up) / red (down), with a second toggle for shading: **Own range**
+  (each asset's largest move in the window is darkest) or **vs. normal
+  move** (how far the move is off the asset's normal move -- std dev of its
+  prior 52 weekly / 60 daily changes, σ; 2.5σ or more is darkest). Both
+  choices are remembered in the viewer's browser. Built by
+  `build_weekly_move_ranks()` / `render_weekly_rank_grid()` in
   `money_flow.py`.
 - **Equilibrium — RSI Reversion**, embedded directly at the bottom of
   `index.html` (the "Equilibrium view ↓" link at the top jumps straight to
